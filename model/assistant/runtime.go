@@ -4611,6 +4611,8 @@ func (r *Runtime) replyTo(ctx context.Context, event MessageEvent, text string) 
 	if draft := r.telegramReplyDraft(event, replyCfg); draft != nil {
 		ctx = withTextDeltaObserver(ctx, draft)
 	}
+	// 模型收尾时填了表情包关键词的话，正文发出后跟一张，见 sticker_finalize.go。
+	ctx, finalizeSticker := withFinalizeSticker(ctx)
 	reply, err = r.generateReply(ctx, replyCfg, event, relationship, messages, agentRegistry)
 	if err == nil && dependencyIndex >= 0 && dependency.pixels && VisionDescriptionRefused(reply) && !hasExternalSideEffect(ctx) {
 		// 附了原图，模型却回「没收到图片」：这条视觉链路送不进图（模型不支持、网关把
@@ -4781,6 +4783,9 @@ func (r *Runtime) replyTo(ctx context.Context, event MessageEvent, text string) 
 		r.applyReplyControlAfterSend(sendCtx, event, reply, controlIntent)
 		// 只同步真正发出去的这一版：审核改写、拦下或发送失败的都到不了这里。
 		r.afterReplyVRChat(event, strings.Join(splitEventChatReply(reply, cfg, event), "\n"))
+		if !controlIntent.RefuseCurrent && !controlIntent.SuppressCurrentUser {
+			r.sendFinalizeSticker(sendCtx, event, finalizeSticker.take())
+		}
 		return nil
 	})
 	if err != nil {
@@ -4908,6 +4913,9 @@ func (r *Runtime) generateReply(ctx context.Context, cfg BotConfig, event Messag
 		// 常驻名单要等注册表建好才算得出来：名单记的是插件、MCP 服务和工具的 ID，
 		// 得知道这一轮到底注册了哪些工具、哪条 MCP 和插件各带了哪几个。
 		agentCfg.CoreTools = r.agentCoreTools(event, registry)
+		if _, ok := registry.Get(dianaStickerToolName); ok {
+			agentCfg.FinalizeFields = append(agentCfg.FinalizeFields, stickerFinalizeField())
+		}
 		r.rememberAgentResidencyCatalog(event, registry, relationship.Owner)
 		agentClient := newRuntimeAgentLLMProvider(r, ctx)
 		// 光在提示词里叮嘱不透露不够：工具在手，被追问两句模型还是会去查。
@@ -4949,6 +4957,7 @@ func (r *Runtime) generateReply(ctx context.Context, cfg BotConfig, event Messag
 		r.rememberAgentRunProgress(event, resp)
 		r.rememberClaimSources(event, resp.Claims)
 		r.rememberToolCalls(event, resp.Steps)
+		finalizeStickerFromContext(ctx).set(resp.FinalizeFields[stickerFinalizeFieldName])
 		if resp.Silent {
 			// 模型在 agent_finalize 上自己按下了静默。没有正文可整理，也不该被
 			// 下游任何一条兜底文案补上；调用方按「本轮不发送」处理。
