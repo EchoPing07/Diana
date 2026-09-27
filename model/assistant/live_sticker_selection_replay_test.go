@@ -291,3 +291,122 @@ func loadStickerSampleMeta(t *testing.T, dir string) map[string]stickerSampleMet
 	}
 	return metas
 }
+
+// TestLiveStickerFinalizePickReplay 拿触发回放里模型在收尾时填的 sticker 关键词，按线上
+// 自动配图的同一套逻辑（检索、去重、只发命中）在导出的库存里挑一张，不调模型。
+//
+//	DIANA_STICKER_FINALIZE_RESULTS=<触发回放的结果 jsonl>  只看 variant=new 且填了 sticker 的
+//	DIANA_STICKER_REPLAY_DIR / DIANA_STICKER_SELECT_LIBRARY / DIANA_STICKER_SELECT_OUT 同挑图回放
+func TestLiveStickerFinalizePickReplay(t *testing.T) {
+	resultsPath := strings.TrimSpace(os.Getenv("DIANA_STICKER_FINALIZE_RESULTS"))
+	libraryPath := strings.TrimSpace(os.Getenv("DIANA_STICKER_SELECT_LIBRARY"))
+	dir := strings.TrimSpace(os.Getenv("DIANA_STICKER_REPLAY_DIR"))
+	if resultsPath == "" || libraryPath == "" || dir == "" {
+		t.Skip("set DIANA_STICKER_FINALIZE_RESULTS, DIANA_STICKER_SELECT_LIBRARY and DIANA_STICKER_REPLAY_DIR")
+	}
+	library := loadStickerLibraryRows(t, libraryPath)
+	stubDir := t.TempDir()
+	remotePaths := map[string]string{}
+	for index := range library {
+		remotePaths[library[index].Hash] = library[index].Path
+		stub := stubDir + "/" + library[index].Hash
+		if err := os.WriteFile(stub, []byte(library[index].Hash), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		library[index].Path = stub
+	}
+	metas := loadStickerSampleMeta(t, dir)
+	raw, err := os.ReadFile(resultsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type pick struct {
+		ID          string `json:"id"`
+		Run         int    `json:"run"`
+		Keywords    string `json:"keywords"`
+		Reply       string `json:"reply"`
+		Library     int    `json:"library"`
+		Matched     int    `json:"matched"`
+		Name        string `json:"name,omitempty"`
+		Description string `json:"description,omitempty"`
+		Hash        string `json:"hash,omitempty"`
+		Path        string `json:"path,omitempty"`
+	}
+	var picks []pick
+	for _, line := range strings.Split(string(raw), "\n") {
+		var result struct {
+			ID      string `json:"id"`
+			Variant string `json:"variant"`
+			Run     int    `json:"run"`
+			Calls   string `json:"calls"`
+		}
+		if json.Unmarshal([]byte(line), &result) != nil || result.Variant != "new" {
+			continue
+		}
+		keywords, reply := finalizeStickerFromCalls(result.Calls)
+		if keywords == "" {
+			continue
+		}
+		meta := metas[result.ID]
+		event := MessageEvent{Kind: EventKind(meta.Kind), GroupID: meta.Group, UserID: meta.User, MessageID: "replay"}
+		if event.Kind == EventKindPrivate {
+			event.GroupID = ""
+		}
+		var assets []StickerAsset
+		for _, row := range library {
+			if row.Kind == meta.Kind && ((row.Kind == "group" && row.GroupID == meta.Group) || (row.Kind == "private" && strings.HasSuffix(row.Session, ":private:"+meta.User))) {
+				assets = append(assets, row.asset(sessionKey(event)))
+			}
+		}
+		store := &stickerAssetTestStore{stickerHistoryStore: stickerHistoryStore{events: map[string][]MessageEvent{}}, assets: assets}
+		runtime := NewRuntime(BotConfig{}, &recordingChannel{}, NewPluginManager(), nil, nil, nil, nil)
+		runtime.SetMessageHistoryStore(stickerSearchOnlyStore{store})
+		tool := newDianaStickerTool(runtime, event, nil)
+		candidates, err := tool.candidates(context.Background(), keywords)
+		if err != nil {
+			t.Fatal(err)
+		}
+		picked, matched := selectStickerCandidates(candidates, 1, time.Now().Unix(), secureRandomIndex)
+		out := pick{ID: result.ID, Run: result.Run, Keywords: keywords, Reply: reply, Library: len(assets), Matched: matched}
+		if matched > 0 && len(picked) > 0 {
+			out.Name, out.Description, out.Hash, out.Path = picked[0].Summary, picked[0].Description, picked[0].Hash, remotePaths[picked[0].Hash]
+		}
+		picks = append(picks, out)
+	}
+	sent := 0
+	for _, item := range picks {
+		if item.Hash != "" {
+			sent++
+		}
+	}
+	t.Logf("filled=%d sent=%d skipped(no keyword hit)=%d", len(picks), sent, len(picks)-sent)
+	if path := os.Getenv("DIANA_STICKER_SELECT_OUT"); path != "" {
+		file, err := os.Create(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		encoder := json.NewEncoder(file)
+		for _, item := range picks {
+			_ = encoder.Encode(item)
+		}
+		_ = file.Close()
+	}
+}
+
+// finalizeStickerFromCalls 从触发回放记下的调用摘要里取出收尾的 sticker 关键词和正文。
+func finalizeStickerFromCalls(calls string) (string, string) {
+	for _, call := range strings.Split(calls, "; ") {
+		encoded, found := strings.CutPrefix(call, "agent_finalize")
+		if !found {
+			continue
+		}
+		var arguments map[string]any
+		if json.Unmarshal([]byte(encoded), &arguments) != nil {
+			continue
+		}
+		keywords, _ := arguments[stickerFinalizeFieldName].(string)
+		content, _ := arguments["content"].(string)
+		return strings.TrimSpace(keywords), content
+	}
+	return "", ""
+}
