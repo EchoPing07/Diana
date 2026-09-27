@@ -988,7 +988,13 @@ type GroupConfig struct {
 	PluginOverrides        map[string]bool                 `json:"plugin_overrides,omitempty"`
 	PluginSettingOverrides PluginSettingOverrides          `json:"plugin_setting_overrides,omitempty"`
 	ReplyGate              *ReplyGate                      `json:"reply_gate,omitempty"`
-	UpdatedAt              time.Time                       `json:"updated_at,omitempty"`
+	// Governance 是本群的规则防御（刷屏、违规词、退群审计），只有群级、没有机器人级：
+	// 每个群的容忍度差得太远，一刀切的默认值只会误伤。nil 表示全部关闭。
+	Governance *GroupGovernance `json:"governance,omitempty"`
+	// WholeMuteRestorePermissions 是 Telegram 全员禁言前的群默认权限快照，解除时按它
+	// 还原。运行时写入，WebUI 保存时以存储里的为准，不接受客户端改写。
+	WholeMuteRestorePermissions map[string]bool `json:"whole_mute_restore_permissions,omitempty"`
+	UpdatedAt                   time.Time       `json:"updated_at,omitempty"`
 }
 
 // GroupExtensionAccess 是一个扩展在某个群里的开放范围：一个基线档位，加一对名单。
@@ -1408,6 +1414,10 @@ func (cfg GroupConfig) WithDefaults(groupID string, base BotConfig) GroupConfig 
 	if cfg.ReplyGate != nil {
 		normalized := cfg.ReplyGate.WithDefaults()
 		cfg.ReplyGate = &normalized
+	}
+	if cfg.Governance != nil {
+		normalized := cfg.Governance.Normalized()
+		cfg.Governance = &normalized
 	}
 	// 旧数据里抄进来的机器人值快照只清一次。必须拿到这个群自己那台机器人才动手：
 	// 拿别的机器人比，会把真正的单独设置当成快照清掉。
