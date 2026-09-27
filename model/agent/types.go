@@ -172,6 +172,7 @@ type Response struct {
 	// SilentReason 是模型给出的一句原因，只用于事件记录和日志，不发给用户。
 	SilentReason string `json:"silent_reason,omitempty"`
 	// FinalizeFields 是模型在 agent_finalize 上填的 Config.FinalizeFields 字段，没填的不出现。
+	// Silent 时同样会带：调用方可以据此「不说话、只做字段表达的事」。
 	FinalizeFields map[string]string `json:"finalize_fields,omitempty"`
 }
 

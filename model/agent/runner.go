@@ -213,8 +213,8 @@ func (r *Runner) Run(ctx context.Context, req Request) (*Response, error) {
 		MaxToolCalls:   r.cfg.MaxSteps,
 		AvailableTools: r.registry.Catalog(0),
 	})
-	// finalizeFields 是最后一次收尾动作带的调用方字段；只有正常收尾才交出去，
-	// 静默和失败时不交（见 finishSilent），免得没说话却单独冒出一张表情包。
+	// finalizeFields 是最后一次收尾动作带的调用方字段。静默收尾也照样交出去：
+	// 「这一轮不说话，只回一张表情包」是静默加字段表达的，要不要用由调用方决定。
 	var finalizeFields map[string]string
 	finish := func(text, reason string) *Response {
 		duration := time.Since(startedAt)
@@ -248,7 +248,6 @@ func (r *Runner) Run(ctx context.Context, req Request) (*Response, error) {
 	// Text 保持为空，由 Silent 告诉调用方「这是模型的决定，不是生成失败」。
 	finishSilent := func(silentReason, reason string) *Response {
 		response := finish("", reason)
-		response.FinalizeFields = nil
 		response.Silent = true
 		response.SilentReason = strings.TrimSpace(silentReason)
 		return response

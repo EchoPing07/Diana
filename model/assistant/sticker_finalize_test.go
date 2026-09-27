@@ -5,6 +5,7 @@ package assistant
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,7 +19,10 @@ type stickerFinalizeLLMProvider struct {
 	capturingLLMProvider
 	sticker        string
 	personaVerdict string
+	silent         bool
+	order          string
 	sawField       bool
+	sawOrder       bool
 }
 
 func (p *stickerFinalizeLLMProvider) Generate(ctx context.Context, req llm.GenerateRequest) (*llm.GenerateResponse, error) {
@@ -37,7 +41,14 @@ func (p *stickerFinalizeLLMProvider) Generate(ctx context.Context, req llm.Gener
 		}
 		properties, _ := tool.Parameters["properties"].(map[string]any)
 		_, p.sawField = properties[stickerFinalizeFieldName]
+		_, p.sawOrder = properties[stickerOrderFieldName]
 		arguments := map[string]any{"content": response.Text}
+		if p.silent {
+			arguments = map[string]any{"content": "", "silent": true, "silent_reason": "一张图就够了"}
+		}
+		if p.order != "" {
+			arguments[stickerOrderFieldName] = p.order
+		}
 		if p.sticker != "" {
 			arguments[stickerFinalizeFieldName] = p.sticker
 		}
@@ -72,12 +83,12 @@ func TestReplyFinalizeStickerFollowsText(t *testing.T) {
 		}
 		sent := channel.sentSnapshot()
 		if sticker == "" {
-			if len(sent) != 1 || len(sent[0].ImageURLs) != 0 {
+			if len(sent) != 1 || sentStickerPath(sent[0]) != "" {
 				t.Fatalf("no keywords: sent = %#v", sent)
 			}
 			continue
 		}
-		if len(sent) != 2 || sent[0].Text == "" || len(sent[1].ImageURLs) != 1 || sent[1].ImageURLs[0] != path {
+		if len(sent) != 2 || sent[0].Text == "" || sentStickerPath(sent[1]) != path {
 			t.Fatalf("with keywords: sent = %#v", sent)
 		}
 	}
@@ -122,8 +133,8 @@ func TestStickerSendBestMatchChecksPersona(t *testing.T) {
 	}
 	event := MessageEvent{Kind: EventKindGroup, GroupID: "g", UserID: "u", MessageID: "m"}
 	store := &stickerPersonaTestStore{stickerAssetTestStore: stickerAssetTestStore{stickerHistoryStore: stickerHistoryStore{events: map[string][]MessageEvent{}}, assets: []StickerAsset{
-		{Session: sessionKey(event), Kind: EventKindGroup, GroupID: "g", MessageID: "a", EventTime: 2, Summary: "动画表情", Path: crude, ContentSHA256: imageBytesSHA256([]byte("crude")), Description: "大叔猥琐地说“晚安宝贝来我被窝”"},
-		{Session: sessionKey(event), Kind: EventKindGroup, GroupID: "g", MessageID: "b", EventTime: 1, Summary: "动画表情", Path: cute, ContentSHA256: imageBytesSHA256([]byte("cute")), Description: "小猫抱着枕头说“晚安”"},
+		{Session: sessionKey(event), Kind: EventKindGroup, GroupID: "g", MessageID: "a", EventTime: 2, Summary: "动画表情", Path: crude, ContentSHA256: imageBytesSHA256([]byte("crude")), Tagged: true, Description: "大叔猥琐地说“晚安宝贝来我被窝”"},
+		{Session: sessionKey(event), Kind: EventKindGroup, GroupID: "g", MessageID: "b", EventTime: 1, Summary: "动画表情", Path: cute, ContentSHA256: imageBytesSHA256([]byte("cute")), Tagged: true, Description: "小猫抱着枕头说“晚安”"},
 	}}, verdicts: map[string]bool{}}
 	channel := &recordingChannel{}
 	judge := &stickerPersonaJudge{}
@@ -134,7 +145,7 @@ func TestStickerSendBestMatchChecksPersona(t *testing.T) {
 	if err != nil || !sent {
 		t.Fatalf("sent=%v err=%v", sent, err)
 	}
-	if got := channel.sentSnapshot(); len(got) != 1 || got[0].ImageURLs[0] != cute {
+	if got := channel.sentSnapshot(); len(got) != 1 || sentStickerPath(got[0]) != cute {
 		t.Fatalf("sent = %#v", got)
 	}
 	if fit, judged := store.verdicts[imageBytesSHA256([]byte("crude"))]; !judged || fit {
@@ -187,6 +198,117 @@ func TestParseStickerPersonaVerdict(t *testing.T) {
 	for raw, want := range map[string]bool{"会": true, "「会」": true, "会，挺可爱的": true, "不会：太低俗": false, "不合适": false, "": false} {
 		if got, _ := parseStickerPersonaVerdict(raw); got != want {
 			t.Errorf("%q → %v, want %v", raw, got, want)
+		}
+	}
+}
+
+// 没按多帧标注过的候选（以前只看第一帧的 GIF），自动配图前先当场重看；重看后关键词对不上就不发。
+func TestStickerSendBestMatchReannotatesStaleCandidate(t *testing.T) {
+	path, hash := writeRecallImageFixture(t)
+	event := MessageEvent{Kind: EventKindGroup, GroupID: "g", UserID: "u", MessageID: "m"}
+	store := &stickerPersonaTestStore{stickerAssetTestStore: stickerAssetTestStore{stickerHistoryStore: stickerHistoryStore{events: map[string][]MessageEvent{}}, assets: []StickerAsset{
+		{Session: sessionKey(event), Kind: EventKindGroup, GroupID: "g", MessageID: "a", EventTime: 1, Summary: "动画表情", Path: path, ContentSHA256: hash, Description: "人物侧卧在床上闭着眼睛，像在睡觉"},
+	}}, verdicts: map[string]bool{}}
+	channel := &recordingChannel{}
+	vision := &stickerReannotateProvider{annotation: "角色趴在床上一直扭动身体，带点暗示。 标签：趴着、扭动、床"}
+	rt := NewRuntime(BotConfig{}, channel, NewPluginManager(), nil, nil, nil, func() (LLMProvider, error) { return vision, nil })
+	rt.SetMessageHistoryStore(store)
+	tool := newDianaStickerTool(rt, event, nil)
+	sent, err := tool.sendBestMatch(context.Background(), "晚安 睡觉")
+	if err != nil || sent || len(channel.sentSnapshot()) != 0 {
+		t.Fatalf("stale sticker sent after re-annotation: sent=%v err=%v", sent, err)
+	}
+	if tags, ok := store.taggedSnapshot(hash); !ok || strings.Join(tags, "|") != "趴着|扭动|床" {
+		t.Fatalf("re-annotation not saved: %v %v", tags, ok)
+	}
+	if vision.annotations != 1 {
+		t.Fatalf("annotations = %d", vision.annotations)
+	}
+}
+
+// stickerReannotateProvider 对表情包标注请求回固定标注，对人设判断回「会」。
+type stickerReannotateProvider struct {
+	annotation  string
+	annotations int
+}
+
+func (p *stickerReannotateProvider) Generate(_ context.Context, req llm.GenerateRequest) (*llm.GenerateResponse, error) {
+	last := req.Messages[len(req.Messages)-1].Content
+	if strings.Contains(last, "合不合你的人设") {
+		return &llm.GenerateResponse{Text: "会"}, nil
+	}
+	p.annotations++
+	return &llm.GenerateResponse{Text: p.annotation}, nil
+}
+
+// 一张图就够、不想说话：静默收尾加 sticker 只回一张表情包；挑不到就什么都不发，也不补兜底文字。
+func TestReplySilentFinalizeSendsStickerOnly(t *testing.T) {
+	withFastSendTiming(t)
+	path := filepath.Join(t.TempDir(), "night.gif")
+	body := []byte("night-sticker")
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, keywords := range []string{"晚安 摸头", "斗图 翻白眼"} {
+		channel := &recordingChannel{}
+		provider := &stickerFinalizeLLMProvider{capturingLLMProvider: capturingLLMProvider{reply: "晚安"}, sticker: keywords, silent: true, personaVerdict: "会"}
+		rt := NewRuntime(BotConfig{AgentEnabled: true}.WithDefaults(), channel, NewDefaultPluginManager(), nil, nil, nil, func() (LLMProvider, error) { return provider, nil })
+		event := MessageEvent{Kind: EventKindPrivate, UserID: "10001", MessageID: "night-" + keywords, RawMessage: "晚安啦"}
+		rt.SetMessageHistoryStore(&stickerHistoryStore{events: map[string][]MessageEvent{sessionKey(event): {{
+			Kind: EventKindPrivate, UserID: "10001", MessageID: "s", Time: 1,
+			Segments: []MessageSegment{{Type: "image", Data: map[string]string{"summary": "[晚安]", "cached_file": path, imageContentSHA256Key: imageBytesSHA256(body)}}},
+		}}}})
+		_, err := rt.replyTo(context.Background(), event, event.RawMessage)
+		var silent *modelSilentFinishError
+		if !errors.As(err, &silent) {
+			t.Fatalf("%s: err = %v, want silent finish", keywords, err)
+		}
+		sent := channel.sentSnapshot()
+		if keywords == "晚安 摸头" {
+			if len(sent) != 1 || sent[0].Text != "" || sentStickerPath(sent[0]) != path {
+				t.Fatalf("sticker-only: sent = %#v", sent)
+			}
+			continue
+		}
+		if len(sent) != 0 {
+			t.Fatalf("no match must stay silent: sent = %#v", sent)
+		}
+	}
+}
+
+// 表情包是第一反应时（sticker_order=before）先甩图再补一句，像真人一样；不填就先说完再甩图。
+func TestReplyFinalizeStickerOrderFollowsModelChoice(t *testing.T) {
+	withFastSendTiming(t)
+	path := filepath.Join(t.TempDir(), "shock.gif")
+	body := []byte("shock-sticker")
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, order := range []string{"before", ""} {
+		channel := &recordingChannel{}
+		provider := &stickerFinalizeLLMProvider{capturingLLMProvider: capturingLLMProvider{reply: "真的假的，你居然一次过了"}, sticker: "震惊 瞪眼", order: order, personaVerdict: "会"}
+		rt := NewRuntime(BotConfig{AgentEnabled: true}.WithDefaults(), channel, NewDefaultPluginManager(), nil, nil, nil, func() (LLMProvider, error) { return provider, nil })
+		event := MessageEvent{Kind: EventKindPrivate, UserID: "10001", MessageID: "order-" + order, RawMessage: "我驾照一次过了"}
+		rt.SetMessageHistoryStore(&stickerHistoryStore{events: map[string][]MessageEvent{sessionKey(event): {{
+			Kind: EventKindPrivate, UserID: "10001", MessageID: "s", Time: 1,
+			Segments: []MessageSegment{{Type: "image", Data: map[string]string{"summary": "[震惊]", "cached_file": path, imageContentSHA256Key: imageBytesSHA256(body)}}},
+		}}}})
+		if _, err := rt.replyTo(context.Background(), event, event.RawMessage); err != nil {
+			t.Fatal(err)
+		}
+		if !provider.sawOrder {
+			t.Fatal("agent_finalize did not offer sticker_order")
+		}
+		sent := channel.sentSnapshot()
+		if len(sent) != 2 {
+			t.Fatalf("order=%q sent = %#v", order, sent)
+		}
+		stickerIndex, textIndex := 1, 0
+		if order == "before" {
+			stickerIndex, textIndex = 0, 1
+		}
+		if sentStickerPath(sent[stickerIndex]) != path || sent[textIndex].Text == "" {
+			t.Fatalf("order=%q sent = %#v", order, sent)
 		}
 	}
 }
