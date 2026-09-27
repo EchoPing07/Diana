@@ -408,6 +408,8 @@ export interface PluginSettingSpec {
   rows?: number;
   /** 凭据类设置；读接口不返回明文，提交空串表示保持原值。 */
   secret?: boolean;
+  // 只能全局设置、不能按群覆盖（端口、连接这类进程里只有一份的资源）。
+  global_only?: boolean;
 }
 
 export interface PluginManifest {
@@ -2749,6 +2751,38 @@ export interface StickerLibraryItem {
 export interface StickerLibraryPage {
   items: StickerLibraryItem[];
   total: number;
+}
+
+export type VRChatParam = { name: string; value: unknown; updated_at: string };
+
+export type VRChatStatus = {
+  enabled: boolean;
+  send_address?: string;
+  listen_address?: string;
+  listening: boolean;
+  listen_error?: string;
+  last_error?: string;
+  apply_error?: string;
+  last_packet_at?: string;
+  last_peer?: string;
+  avatar_id?: string;
+  avatar_changed_at?: string;
+  builtin?: Record<string, unknown>;
+  params?: VRChatParam[];
+  expression?: string;
+  expression_at?: string;
+  expression_by_mood?: boolean;
+  expressions?: string[];
+  chatbox_pending: number;
+  last_chatbox?: string;
+  last_chatbox_at?: string;
+  active_inputs?: string[];
+  mapping_problems?: string[];
+  driver_profile?: string;
+};
+
+export function getVRChatStatus(): Promise<VRChatStatus> {
+  return requestJSON<VRChatStatus>("/api/assistant/plugins/vrchat/status");
 }
 
 export function listStickerLibrary(profile: string, query: string, offset: number, limit: number): Promise<StickerLibraryPage> {
