@@ -359,6 +359,24 @@ type LocalMediaSharerAwarePlugin interface {
 	SetLocalMediaSharer(LocalMediaSharer)
 }
 
+// PluginStateObserver 让持有常驻资源（监听端口、后台连接）的插件跟着开关和
+// 设置启停。插件的开关按机器人分，但这类资源是进程级的：只要有一台机器人开着
+// 就该在跑。启动恢复、迁移、安装卸载、改开关、改设置之后都会调用，插件要自己
+// 保证重复调用是幂等的。
+type PluginStateObserver interface {
+	PluginStateChanged(change PluginStateChange)
+}
+
+// PluginStateChange 是交给 PluginStateObserver 的一次状态快照。
+type PluginStateChange struct {
+	// Enabled 表示至少有一台机器人（或未单独设置的默认开关）启用了插件。
+	Enabled bool
+	// EnabledProfiles 是显式打开了插件的机器人，按 ID 排序。
+	EnabledProfiles []string
+	// Settings 是全局设置，按群覆盖不参与：进程级资源只有一份。
+	Settings SettingValues
+}
+
 // SecretSettingMerger lets a plugin update one entry inside a structured
 // secret without requiring the WebUI to read the other secret values back.
 type SecretSettingMerger interface {
@@ -426,6 +444,7 @@ func NewDefaultPluginManager() *PluginManager {
 		NewRSSWatchPlugin(nil),
 		NewGroupRelationsPlugin(),
 		NewStickerPlugin(),
+		NewVRChatPlugin(),
 		NewFileDeliveryPlugin(),
 		NewCodingAgentPlugin(),
 		NewStatusCommandPlugin(),
@@ -696,6 +715,7 @@ func (m *PluginManager) Snapshot() map[string]PersistedPluginState {
 
 // Restore 从持久化状态恢复插件开关。
 func (m *PluginManager) Restore(states map[string]PersistedPluginState) {
+	defer m.notifyAllStateObservers()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for id, plugin := range m.catalog {
@@ -747,6 +767,7 @@ func (m *PluginManager) RegisterPlugin(p Plugin) error {
 	if strings.HasPrefix(manifest.ID, "official.") && !manifest.BuiltIn {
 		return fmt.Errorf("diana: plugin id prefix official. is reserved for built-in plugins")
 	}
+	defer m.notifyStateObserver(manifest.ID)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if state, ok := m.states[manifest.ID]; ok {
@@ -773,21 +794,29 @@ func (m *PluginManager) UnregisterPlugin(id string) error {
 		return ErrPluginNotFound
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	state, ok := m.states[id]
 	if !ok {
+		m.mu.Unlock()
 		return ErrPluginNotFound
 	}
 	if state.Manifest.BuiltIn {
+		m.mu.Unlock()
 		return ErrBuiltInPluginAction
 	}
+	plugin := m.catalog[id]
 	delete(m.catalog, id)
 	delete(m.states, id)
+	m.mu.Unlock()
+	// 摘掉之后管理器里已经查不到它，只能在这里直接告诉它停下。
+	if observer, ok := plugin.(PluginStateObserver); ok {
+		observer.PluginStateChanged(PluginStateChange{})
+	}
 	return nil
 }
 
 // Install 安装并启用指定插件。
 func (m *PluginManager) Install(id string) (PluginState, error) {
+	defer m.notifyStateObserver(id)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	plugin, ok := m.catalog[id]
@@ -807,6 +836,7 @@ func (m *PluginManager) Install(id string) (PluginState, error) {
 
 // Uninstall 卸载并关闭指定插件。
 func (m *PluginManager) Uninstall(id string) (PluginState, error) {
+	defer m.notifyStateObserver(id)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	plugin, ok := m.catalog[id]
@@ -840,6 +870,7 @@ func (m *PluginManager) UpdateSettingsWithClears(id string, values map[string]an
 }
 
 func (m *PluginManager) UpdateSettingsForProfile(id, profileID string, values map[string]any, clear []string) (PluginState, error) {
+	defer m.notifyStateObserver(id)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	plugin, ok := m.catalog[id]
@@ -900,6 +931,7 @@ func (m *PluginManager) SetEnabled(id string, enabled bool) (PluginState, error)
 }
 
 func (m *PluginManager) SetEnabledForProfile(id, profileID string, enabled bool) (PluginState, error) {
+	defer m.notifyStateObserver(id)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	plugin, ok := m.catalog[id]
@@ -930,6 +962,56 @@ func (m *PluginManager) SetEnabledForProfile(id, profileID string, enabled bool)
 	}
 	m.states[id] = state
 	return state.ForProfile(profileID), nil
+}
+
+// notifyStateObserver 在放锁之后通知插件：插件启停资源可能要等协程退出，
+// 不能占着管理器的锁。
+func (m *PluginManager) notifyStateObserver(id string) {
+	if m == nil {
+		return
+	}
+	m.mu.RLock()
+	plugin, ok := m.catalog[id]
+	state := m.states[id]
+	m.mu.RUnlock()
+	observer, isObserver := plugin.(PluginStateObserver)
+	if !ok || !isObserver {
+		return
+	}
+	observer.PluginStateChanged(pluginStateChange(state))
+}
+
+func pluginStateChange(state PluginState) PluginStateChange {
+	change := PluginStateChange{Settings: effectivePluginSettingsForGroup(state.Manifest.Settings, state.Settings, nil)}
+	if !state.Installed {
+		return change
+	}
+	change.Enabled = state.Enabled
+	for profile, enabled := range state.ProfileEnabled {
+		if enabled && strings.TrimSpace(profile) != "" {
+			change.Enabled = true
+			change.EnabledProfiles = append(change.EnabledProfiles, profile)
+		}
+	}
+	slices.Sort(change.EnabledProfiles)
+	return change
+}
+
+func (m *PluginManager) notifyAllStateObservers() {
+	if m == nil {
+		return
+	}
+	m.mu.RLock()
+	ids := make([]string, 0, len(m.catalog))
+	for id, plugin := range m.catalog {
+		if _, ok := plugin.(PluginStateObserver); ok {
+			ids = append(ids, id)
+		}
+	}
+	m.mu.RUnlock()
+	for _, id := range ids {
+		m.notifyStateObserver(id)
+	}
 }
 
 // CanAskAgent reports whether an installed, enabled plugin may turn a
