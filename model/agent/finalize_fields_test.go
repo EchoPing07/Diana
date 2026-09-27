@@ -39,8 +39,8 @@ func TestFinalizeFieldsRoundTrip(t *testing.T) {
 	}
 }
 
-// 静默收尾时不交出调用方字段：一句话没说，不该单独冒出一张表情包。
-func TestFinalizeFieldsDroppedOnSilentFinish(t *testing.T) {
+// 静默收尾时调用方字段照样交出去：「不说话、只回一张表情包」就是这样表达的。
+func TestFinalizeFieldsKeptOnSilentFinish(t *testing.T) {
 	client := &silentFinalizeClient{arguments: map[string]any{"content": "", "silent": true, "sticker": "晚安"}}
 	runner, err := NewRunner(client, Config{WorkDir: t.TempDir(), MaxSteps: 2, FinalizeFields: []FinalizeField{{Name: "sticker"}}}, NewToolRegistry())
 	if err != nil {
@@ -50,7 +50,7 @@ func TestFinalizeFieldsDroppedOnSilentFinish(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !resp.Silent || resp.FinalizeFields != nil {
+	if !resp.Silent || resp.Text != "" || resp.FinalizeFields["sticker"] != "晚安" {
 		t.Fatalf("resp = %#v", resp)
 	}
 }

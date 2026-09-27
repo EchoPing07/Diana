@@ -4625,6 +4625,14 @@ func (r *Runtime) replyTo(ctx context.Context, event MessageEvent, text string) 
 			// 私聊的收尾计数从这一轮学到「机器人这边已经收尾了」，见
 			// notePrivateClosingSilence。
 			r.notePrivateClosingSilence(event, cfg, time.Now())
+			// 不说话、只回一张表情包：静默收尾时填了 sticker。挑不到、到了上限或者被叫停
+			// 都不补文字，这一轮就是安静的。
+			if query := finalizeSticker.take(); query != "" && r.groupStopDropsReply(event, proactiveTriggered, time.Now()) == nil {
+				_ = r.withReplySuppressionOutboundGate(ctx, event, func(sendCtx context.Context) error {
+					r.sendFinalizeSticker(sendCtx, event, query)
+					return nil
+				})
+			}
 			return "", silentFinish
 		}
 	}
