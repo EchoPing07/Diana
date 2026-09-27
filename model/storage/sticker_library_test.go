@@ -113,7 +113,7 @@ func TestStickerAssetsCarryTagsUsageAndPrune(t *testing.T) {
 	if err := store.SaveImageDescription(ctx, assistant.ImageDescriptionRecord{ContentSHA256: middle, Description: "通用描述", Source: "vision"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.SaveStickerTags(ctx, assistant.StickerTagRecord{ContentSHA256: newest, Gist: "摸头安慰", Tags: []string{"安慰", "摸头"}}); err != nil {
+	if err := store.SaveStickerTags(ctx, assistant.StickerTagRecord{ContentSHA256: newest, Gist: "摸头安慰", Tags: []string{"安慰", "摸头"}, Version: assistant.StickerAnnotationVersion}); err != nil {
 		t.Fatal(err)
 	}
 	for range 2 {
@@ -229,5 +229,52 @@ func TestStickerPersonaFitRoundTrip(t *testing.T) {
 	}
 	if again, _ := store.StickerPersonaFit(ctx, "diana", []string{a}); !again[a] {
 		t.Fatal("re-judgement did not overwrite")
+	}
+}
+
+// GIF 以前的标注只看了第一帧：版本不对的 GIF 标签按没标注处理，等检索时重标；静态图的旧标签照用。
+func TestStickerTagsFromBeforeGIFStoryboardAreStaleForGIFsOnly(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewSQLiteStore(filepath.Join(t.TempDir(), "sticker-tag-version.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	gifHash, pngHash := strings.Repeat("a", 64), strings.Repeat("b", 64)
+	for _, item := range []struct{ hash, path string }{{gifHash, "/cache/x.gif"}, {pngHash, "/cache/y.png"}} {
+		event := stickerLibraryEvent("bot", "g1", "m-"+item.hash[:1], 100, item.hash, "[动画表情]", item.path)
+		if strings.HasSuffix(item.path, ".png") {
+			event.Segments[0].Data["cached_mime"] = "image/png"
+		}
+		if err := store.indexStickerAssets(ctx, "group:g1", event); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.SaveStickerTags(ctx, assistant.StickerTagRecord{ContentSHA256: item.hash, Gist: "旧标注", Tags: []string{"睡觉"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tagged := func() map[string]assistant.StickerAsset {
+		assets, err := store.ListStickerAssets(ctx, assistant.StickerHistoryQuery{Session: "group:g1", Limit: 10})
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]assistant.StickerAsset{}
+		for _, asset := range assets {
+			out[asset.ContentSHA256] = asset
+		}
+		return out
+	}
+	got := tagged()
+	if got[gifHash].Tagged || got[gifHash].Gist != "" || len(got[gifHash].Tags) != 0 {
+		t.Fatalf("stale gif tags still used: %#v", got[gifHash])
+	}
+	if !got[pngHash].Tagged || got[pngHash].Gist != "旧标注" {
+		t.Fatalf("static image tags dropped: %#v", got[pngHash])
+	}
+	if err := store.SaveStickerTags(ctx, assistant.StickerTagRecord{ContentSHA256: gifHash, Gist: "趴在床上扭动", Tags: []string{"扭动"}, Version: assistant.StickerAnnotationVersion}); err != nil {
+		t.Fatal(err)
+	}
+	if again := tagged()[gifHash]; !again.Tagged || again.Gist != "趴在床上扭动" {
+		t.Fatalf("re-annotated gif = %#v", again)
 	}
 }

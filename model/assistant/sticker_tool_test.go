@@ -151,7 +151,7 @@ func TestStickerToolUsesDurableAssetStoreAndBoundCandidate(t *testing.T) {
 	if _, err := tool.Run(context.Background(), map[string]any{"operation": "send", "sticker_id": search.Candidates[0].ID}); err != nil {
 		t.Fatal(err)
 	}
-	if sent := channel.sentSnapshot(); len(sent) != 1 || len(sent[0].ImageURLs) != 1 || sent[0].ImageURLs[0] != path {
+	if sent := channel.sentSnapshot(); len(sent) != 1 || sentStickerPath(sent[0]) != path {
 		t.Fatalf("sent=%#v", sent)
 	}
 }
@@ -289,7 +289,7 @@ func TestStickerToolSendRecordsWhichStickerWasSent(t *testing.T) {
 	if delivery.Images != 1 || len(delivery.Media) != 1 {
 		t.Fatalf("delivery = %#v", delivery)
 	}
-	if media := delivery.Media[0]; media.Kind != "image" || media.Source != stickerPath || media.Label != "表情包：无语" {
+	if media := delivery.Media[0]; media.Kind != "image" || media.Source != stickerPath || media.Label != "[无语]" {
 		t.Fatalf("media = %#v", media)
 	}
 }
@@ -391,7 +391,7 @@ func TestStickerToolSearchesThenSendsOnlyCurrentConversationSticker(t *testing.T
 		t.Fatal(err)
 	}
 	messages := channel.sentSnapshot()
-	if !sent.OK || sent.Action != "sent" || len(messages) != 1 || len(messages[0].ImageURLs) != 1 || messages[0].ImageURLs[0] != currentPath {
+	if !sent.OK || sent.Action != "sent" || len(messages) != 1 || sentStickerPath(messages[0]) != currentPath {
 		t.Fatalf("sent=%#v messages=%#v", sent, messages)
 	}
 
@@ -791,5 +791,63 @@ func TestStickerPromptRuleFollowsToolRegistration(t *testing.T) {
 	bare, _ := runtime.systemPromptPartsWithRelationshipAndAgentTools(event, nil, false, RelationshipPolicy{}, true, agent.NewToolRegistry())
 	if strings.Contains(bare, promptToolSticker) {
 		t.Fatal("sticker rule injected without the tool")
+	}
+}
+
+// sentStickerPath 取出一条发送里的表情包文件：QQ 上是带 sub_type=1 的图片消息段，其他平台是普通图片。
+func sentStickerPath(message OutgoingMessage) string {
+	for _, segment := range message.Segments {
+		if segment.Type == "image" && segment.Data["sub_type"] == "1" {
+			return segment.Data["file"]
+		}
+	}
+	if len(message.ImageURLs) == 1 {
+		return message.ImageURLs[0]
+	}
+	return ""
+}
+
+// QQ 上按表情包形式发（小尺寸、能添加到表情），不是大图；其他平台照旧发图片。
+func TestStickerOutgoingMessageUsesQQStickerForm(t *testing.T) {
+	candidate := stickerCandidate{Path: "/cache/a.gif", Summary: "无语"}
+	qq := stickerOutgoingMessage(PlatformOneBotV11, candidate)
+	if len(qq.ImageURLs) != 0 || len(qq.Segments) != 1 || qq.Segments[0].Data["sub_type"] != "1" || qq.Segments[0].Data["summary"] != "[无语]" || qq.Segments[0].Data["file"] != "/cache/a.gif" {
+		t.Fatalf("qq = %#v", qq)
+	}
+	if segments := buildOutgoingSegments(qq); len(segments) != 1 || segments[0]["type"] != "image" {
+		t.Fatalf("onebot segments = %#v", segments)
+	}
+	generic := stickerOutgoingMessage(PlatformTelegram, stickerCandidate{Path: "/cache/a.gif"})
+	if len(generic.Segments) != 0 || len(generic.ImageURLs) != 1 || generic.ImageLabels[0] != "表情包" {
+		t.Fatalf("telegram = %#v", generic)
+	}
+}
+
+// 按表情包形式发的图片消息段也要把本地路径换成分享地址：接入端跑在容器里读不到宿主机文件。
+// cached_file 会在组装 OneBot 消息时盖掉 file，所以不能留。Telegram 同进程上传，保持原路径。
+func TestResolveOutgoingLocalImagesSharesStickerSegments(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.gif")
+	if err := os.WriteFile(path, []byte("gif"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rt := NewRuntime(BotConfig{}, &recordingChannel{}, NewPluginManager(), nil, nil, nil, nil)
+	rt.SetLocalMediaSharer(&recordingLocalMediaSharer{url: "http://host.docker.internal:18080/media/token"})
+	msg := stickerOutgoingMessage(PlatformOneBotV11, stickerCandidate{Path: path, Summary: "无语"})
+	msg.Platform = PlatformOneBotV11
+	resolved := rt.resolveOutgoingLocalImages(msg)
+	data := resolved.Segments[0].Data
+	if data["file"] != "http://host.docker.internal:18080/media/token" || data["cached_file"] != "" || data["sub_type"] != "1" {
+		t.Fatalf("resolved = %#v", data)
+	}
+	if msg.Segments[0].Data["file"] != path {
+		t.Fatal("caller's message was mutated")
+	}
+	built := buildOutgoingSegments(resolved)
+	if file := built[0]["data"].(map[string]string)["file"]; file != "http://host.docker.internal:18080/media/token" {
+		t.Fatalf("onebot file = %q", file)
+	}
+	msg.Platform = PlatformTelegram
+	if got := rt.resolveOutgoingLocalImages(msg); got.Segments[0].Data["file"] != path {
+		t.Fatalf("telegram path changed: %#v", got.Segments[0].Data)
 	}
 }

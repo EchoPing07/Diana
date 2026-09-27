@@ -38,11 +38,18 @@ type StickerAssetStore interface {
 	ListStickerAssets(context.Context, StickerHistoryQuery) ([]StickerAsset, error)
 }
 
+// StickerAnnotationVersion 标记表情包标注是按哪种看图方式做的。frames-v1：动图按多帧分镜看
+// （见 gif_storyboard.go）。之前的 GIF 标注只看了第一帧，版本不符的 GIF 标注按没标注处理。
+const StickerAnnotationVersion = "frames-v1"
+
+const stickerAnnotationVersion = StickerAnnotationVersion
+
 // StickerTagRecord 是一张表情包的检索标注，按图片哈希存，跨会话共用。
 type StickerTagRecord struct {
 	ContentSHA256 string
 	Gist          string
 	Tags          []string
+	Version       string
 }
 
 type StickerTagStore interface {

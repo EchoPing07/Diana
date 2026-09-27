@@ -293,6 +293,9 @@ func normalizeLLMDataURLParts(value string) ([]string, error) {
 		}
 		return nil, fmt.Errorf("decode image data URL: %w", err)
 	}
+	if parts, ok := animatedGIFParts(body); ok {
+		return parts, nil
+	}
 	config, _, configErr := image.DecodeConfig(bytes.NewReader(body))
 	if configErr != nil || !longImageDimensions(config.Width, config.Height) {
 		url, normalizeErr := normalizeLLMDataURL(value)
@@ -325,6 +328,9 @@ func normalizeLLMDataURL(value string) (string, error) {
 }
 
 func normalizeLLMImageParts(body []byte, contentType string) ([]string, error) {
+	if parts, ok := animatedGIFParts(body); ok {
+		return parts, nil
+	}
 	overview, err := normalizeLLMImageBytes(body, contentType)
 	if err != nil {
 		return nil, err
@@ -352,6 +358,23 @@ func normalizeLLMImageParts(body []byte, contentType string) ([]string, error) {
 		parts = append(parts, tile)
 	}
 	return parts, nil
+}
+
+// animatedGIFParts 把多帧 GIF 换成一张按时间顺序排列的分镜图（见 gif_storyboard.go），
+// 单帧 GIF 和其他格式返回 false 走原来的流程。
+func animatedGIFParts(body []byte) ([]string, bool) {
+	if !bytes.HasPrefix(body, []byte("GIF8")) {
+		return nil, false
+	}
+	storyboard, _, ok := gifStoryboard(body)
+	if !ok {
+		return nil, false
+	}
+	url, err := normalizeLLMImageBytes(storyboard, "image/jpeg")
+	if err != nil {
+		return nil, false
+	}
+	return []string{url}, true
 }
 
 func longImageDimensions(width, height int) bool {

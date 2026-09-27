@@ -31,9 +31,9 @@ var promptStickerPersonaFitSpec = registerPrompt(PromptSpec{
 	Group: PromptGroupMedia,
 	Title: "表情包 · 合不合人设",
 	Usage: "机器人要发一张表情包前，按人设判断它以自己的身份发这张自不自然；判定不会发的就不发，结果按人设缓存。",
-	Default: "你要在聊天里以自己的身份发一张表情包，先判断它合不合你的人设。表情包的内容：\n名称：{{name}}\n简介：{{description}}\n标签：{{tags}}\n" +
+	Default: "你要在聊天里以自己的身份发一张表情包，先判断它合不合你的人设。表情包的内容：\n名称：{name}\n简介：{description}\n标签：{tags}\n" +
 		"表情包是借来的表达：图里是别的角色、用了别的自称（比如「小肥鱼」「本喵」）、带着撒娇自恋调皮摆烂这类情绪都没关系，只要这份情绪你会有，就可以发。" +
-		"只有这些不发：低俗露骨或成人梗、辱骂挑衅或恶意嘲讽、和你的气质完全相反的口吻（例如猥琐大叔腔、油腻撩人）。" +
+		"只有这些不发：低俗露骨或成人梗（包括带性暗示的动作）、辱骂挑衅或恶意嘲讽、和你的气质完全相反的口吻（例如猥琐大叔腔、油腻撩人）。" +
 		"只回答一行：「会」或者「不会：一句原因」。",
 	Vars: []PromptVar{
 		{Name: "name", Description: "表情包名称，平台没给名称时是「动画表情」"},
@@ -50,9 +50,10 @@ func (r *Runtime) stickerPersonaFitStore() StickerPersonaFitStore {
 	return fitStore
 }
 
-// stickerPersonaKey 是人设全文的指纹：人设一改，旧的判断自然作废。
+// stickerPersonaKey 是人设全文加标注版本的指纹：人设一改、或者看图方式变了（动图改成
+// 多帧分镜），旧的判断自然作废。
 func stickerPersonaKey(cfg BotConfig) string {
-	sum := sha256.Sum256([]byte(strings.TrimSpace(cfg.SystemPrompt)))
+	sum := sha256.Sum256([]byte(strings.TrimSpace(cfg.SystemPrompt) + "\x00" + stickerAnnotationVersion))
 	return hex.EncodeToString(sum[:8])
 }
 
