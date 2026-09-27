@@ -7,6 +7,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -62,21 +64,23 @@ type dianaCodingResult struct {
 }
 
 type dianaCodingJob struct {
-	Agent       string  `json:"agent"`
-	ID          string  `json:"id"`
-	Status      string  `json:"status"`
-	Workspace   string  `json:"workspace"`
-	Backend     string  `json:"backend"`
-	Instruction string  `json:"instruction"`
-	Elapsed     string  `json:"elapsed"`
-	SessionID   string  `json:"session_id,omitempty"`
-	LastAction  string  `json:"last_action,omitempty"`
-	Steps       int     `json:"steps,omitempty"`
-	Result      string  `json:"result,omitempty"`
-	Error       string  `json:"error,omitempty"`
-	Turns       int     `json:"turns,omitempty"`
-	CostUSD     float64 `json:"cost_usd,omitempty"`
-	CanFollowUp bool    `json:"can_follow_up"`
+	Agent       string `json:"agent"`
+	ID          string `json:"id"`
+	Status      string `json:"status"`
+	Workspace   string `json:"workspace"`
+	Backend     string `json:"backend"`
+	Instruction string `json:"instruction"`
+	Elapsed     string `json:"elapsed"`
+	SessionID   string `json:"session_id,omitempty"`
+	LastAction  string `json:"last_action,omitempty"`
+	Steps       int    `json:"steps,omitempty"`
+	Result      string `json:"result,omitempty"`
+	// ResultTruncated 说明 result 只是开头：全文汇报时已经整段发给人了。
+	ResultTruncated bool    `json:"result_truncated,omitempty"`
+	Error           string  `json:"error,omitempty"`
+	Turns           int     `json:"turns,omitempty"`
+	CostUSD         float64 `json:"cost_usd,omitempty"`
+	CanFollowUp     bool    `json:"can_follow_up"`
 	// AwaitingApproval 是任务正停着等确认的那个操作。查进度时这条比「最近动作」
 	// 重要：任务没在跑，是在等人。
 	AwaitingApproval  string `json:"awaiting_approval,omitempty"`
@@ -168,6 +172,7 @@ func (t *dianaCodingTool) submit(ctx context.Context, cfg codingAgentConfig, inp
 	if instruction == "" {
 		return "", fmt.Errorf("instruction 不能为空")
 	}
+	task := instruction
 	if background := strings.TrimSpace(configToolString(input, "context")); background != "" {
 		instruction = "背景（来自聊天记录）：\n" + background + "\n\n任务：\n" + instruction
 	}
@@ -188,14 +193,82 @@ func (t *dianaCodingTool) submit(ctx context.Context, cfg codingAgentConfig, inp
 		if finished.Status != codingJobStatusSucceeded {
 			message = "任务刚启动就结束了，没有成功，不会再单独汇报。直接把 error 照实告诉用户，不要说还在后台运行。"
 		}
+		// 结果交给这一轮时模型只拿得到开头，全文由这里直接发出去，否则超出的部分
+		// 谁也看不到。
+		if view.ResultTruncated && t.postCodingResultBody(ctx, finished.Result) {
+			message = "任务已经跑完，结果全文已经由系统发到聊天里了，不会再单独汇报。不要重贴结果，用一两句说清结论就行。"
+		}
 		return codingToolJSON(dianaCodingResult{OK: true, Operation: operation, Job: &view, Message: message})
 	}
 	message := fmt.Sprintf("任务已在后台启动，跑完我会主动汇报。期间可以用 status %s 查进度。", job.ID)
 	if resumeSession != "" {
 		message = fmt.Sprintf("已在原会话上追加指令，任务号 %s。", job.ID)
 	}
+	if t.announceCodingJob(ctx, renderCodingAcceptCard(job, cfg, task, resumeSession != "")) {
+		message = "受理消息已经由系统发到聊天里了，任务号、代理、工作区和指令摘要都在里面，不要再复述。" +
+			"跑完会自动汇报，别自己编进度或结果；没有别的要说就不用回复。"
+	}
 	view := codingJobView(job, nil)
 	return codingToolJSON(dianaCodingResult{OK: true, Operation: operation, Job: &view, Message: message})
+}
+
+// announceCodingJob 由代码发一条受理消息。「派出去了没有」不能只凭模型一句话：模型
+// 说过「交给 Claude Code 了」却根本没调工具，群里看着和真派了一模一样，等来的只有
+// 沉默。受理消息只在进程真起来之后由这里发，看不到它就是没派。发不出去不影响任务，
+// 退回让模型自己报任务号。
+func (t *dianaCodingTool) announceCodingJob(ctx context.Context, text string) bool {
+	if err := t.runtime.sendOutgoing(ctx, t.event, routeOutgoingToEvent(t.event, OutgoingMessage{Text: text})); err != nil {
+		log.Printf("diana coding accept card not sent: %v", err)
+		return false
+	}
+	// 话已经出去了：这一轮不能再被合并重来，否则重新生成时会把受理消息再发一遍。
+	t.runtime.sealDirectReply(ctx)
+	if typing := typingIndicatorFromContext(ctx); typing != nil {
+		typing.resume()
+	}
+	return true
+}
+
+// postCodingResultBody 在这一轮里把结果全文发出去，走和汇报全文一样的合并转发。
+func (t *dianaCodingTool) postCodingResultBody(ctx context.Context, body string) bool {
+	if err := t.runtime.deliverCodingReportBody(ctx, t.event, body); err != nil {
+		log.Printf("diana coding result body not posted: %v", err)
+		return false
+	}
+	t.runtime.sealDirectReply(ctx)
+	if typing := typingIndicatorFromContext(ctx); typing != nil {
+		typing.resume()
+	}
+	return true
+}
+
+// renderCodingAcceptCard 是受理消息的正文，格式固定，不经过模型。
+func renderCodingAcceptCard(job CodingJob, cfg codingAgentConfig, task string, followUp bool) string {
+	title := "已派出编码任务 " + job.ID
+	if followUp {
+		title = "已在原会话上追加指令，任务号 " + job.ID
+	}
+	agent := codingBackendLabel(cfg)
+	if name := strings.TrimSpace(job.Agent); name != "" && name != codingDefaultAgent {
+		agent += "（" + name + "）"
+	}
+	task = strings.Join(strings.Fields(task), " ")
+	return title + "\n代理：" + agent + " · 工作区 " + job.Workspace +
+		"\n指令：" + truncateRunes(task, 120) +
+		"\n跑完会在这里汇报结果。"
+}
+
+func codingBackendLabel(cfg codingAgentConfig) string {
+	switch cfg.Backend {
+	case codingBackendClaude:
+		return "Claude Code"
+	case codingBackendCodex:
+		return "Codex"
+	}
+	if name := filepath.Base(strings.TrimSpace(cfg.Command)); name != "" && name != "." {
+		return name
+	}
+	return "编码 CLI"
 }
 
 // awaitQuickFinish 等任务头几秒：这期间结束的结果由这一轮的回复带出去，免得单独
@@ -417,7 +490,7 @@ func codingJobView(job CodingJob, snapshot *codingJobSnapshot) dianaCodingJob {
 		Agent:       job.Agent,
 		Instruction: truncateRunes(job.Instruction, 300),
 		SessionID:   job.SessionID,
-		Result:      job.Result,
+		Result:      truncateRunes(job.Result, codingJobResultPreviewRunes),
 		Error:       job.Error,
 		Turns:       job.Turns,
 		CostUSD:     job.CostUSD,
@@ -442,6 +515,7 @@ func codingJobView(job CodingJob, snapshot *codingJobSnapshot) dianaCodingJob {
 			view.Result = ""
 		}
 	}
+	view.ResultTruncated = view.Result != "" && view.Result != job.Result
 	view.CanFollowUp = job.finished() && job.Backend == codingBackendClaude && view.SessionID != ""
 	return view
 }
