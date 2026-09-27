@@ -26,16 +26,14 @@ func stickerFinalizeField() agent.FinalizeField {
 	return agent.FinalizeField{
 		Name: stickerFinalizeFieldName,
 		Description: "想配一张表情包时，填 2 到 6 个空格分隔的短关键词（情绪、动作、场景和同义说法），例如“得意 叉腰”“晚安 摸头”。" +
-			"有正文时和正文一起发，谁先谁后看 sticker_order；一张图就够、不想说话时，填 silent=true、content 留空，只回这张表情包。挑不到就不发，也不会补文字。" +
-			"只在闲聊、接梗、调侃、吐槽、安慰、庆祝、道谢、道晚安这类以情绪为主的接话里填；认真回答问题、做任务时留空。",
+			"有正文时和正文一起发，先后看 sticker_order；只想回一张图时填 silent=true、content 留空。挑不到合适的就不发，也不会补文字。配不配由你按当下的聊天自己判断。",
 	}
 }
 
 func stickerOrderField() agent.FinalizeField {
 	return agent.FinalizeField{
-		Name: stickerOrderFieldName,
-		Description: "填了 sticker 又有正文时，表情包和文字谁先发。before：表情包是你对这句话的第一反应（震惊、笑死、无语、委屈、问号），先甩图再补一句；" +
-			"after 或留空：表情包是给这句话收尾点题（晚安、好耶、得意、比心），先说完再甩图。只发表情包时不用填。",
+		Name:        stickerOrderFieldName,
+		Description: "填了 sticker 又有正文时，表情包和文字谁先发：before 先甩图再说话，after 或留空先说完再甩图。按真人聊天的习惯自己判断。",
 	}
 }
 
