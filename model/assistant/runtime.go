@@ -464,6 +464,7 @@ type Runtime struct {
 	browserSource             func() string
 	media                     *MediaStore
 	members                   *memberCache
+	bodyAccounts              bodyAccountMembership
 	now                       func() time.Time
 	quietNotices              map[string]time.Time
 	resolverDeliveryMu        sync.Mutex
@@ -3790,7 +3791,7 @@ func (r *Runtime) replyTo(ctx context.Context, event MessageEvent, text string) 
 		}
 	}
 	replyHistory := r.promptContextHistory(event, cfg)
-	ctx = r.withIdentityPrivacyContext(ctx, event, replyHistory)
+	ctx = r.withReplyIdentityPrivacyContext(ctx, event, replyHistory)
 	// 每条消息单独限时，防止慢模型/插件占住并发槽太久。
 	ctx, cancel := context.WithTimeout(ctx, cfg.RequestTimeout)
 	defer cancel()
