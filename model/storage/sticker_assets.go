@@ -50,6 +50,15 @@ CREATE TABLE IF NOT EXISTS sticker_tags (
   tags TEXT NOT NULL,
   updated_at INTEGER NOT NULL
 );
+-- 这张表情包合不合某份人设：以机器人本人的身份发它自不自然。按人设全文的指纹存，人设改了就重判。
+CREATE TABLE IF NOT EXISTS sticker_persona_fit (
+  persona_key TEXT NOT NULL,
+  content_sha256 TEXT NOT NULL,
+  fit INTEGER NOT NULL,
+  reason TEXT,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (persona_key, content_sha256)
+);
 -- 机器人在某个会话里发过哪张表情包：用来避免连发同一张，也算作这张图「还在用」。
 CREATE TABLE IF NOT EXISTS sticker_usage (
   session TEXT NOT NULL,
@@ -356,6 +365,53 @@ ON CONFLICT(session, content_sha256) DO UPDATE SET
   sent_count=sticker_usage.sent_count + 1,
   last_sent_at=MAX(sticker_usage.last_sent_at, excluded.last_sent_at)
 `, session, hash, sentAt)
+	return err
+}
+
+// StickerPersonaFit 读出这些表情包在某份人设下的判断结果；没判过的不在结果里。
+func (s *SQLiteStore) StickerPersonaFit(ctx context.Context, personaKey string, hashes []string) (map[string]bool, error) {
+	result := map[string]bool{}
+	personaKey = strings.TrimSpace(personaKey)
+	if s == nil || s.db == nil || personaKey == "" || len(hashes) == 0 {
+		return result, nil
+	}
+	for start := 0; start < len(hashes); start += 500 {
+		batch := hashes[start:min(start+500, len(hashes))]
+		rows, err := s.eventReader().QueryContext(ctx, `SELECT content_sha256, fit FROM sticker_persona_fit WHERE persona_key = ? AND content_sha256 IN (`+sqlPlaceholders(len(batch))+`)`,
+			append([]any{personaKey}, stringArgs(batch)...)...)
+		if err != nil {
+			return nil, fmt.Errorf("load sticker persona fit: %w", err)
+		}
+		for rows.Next() {
+			var hash string
+			var fit bool
+			if err := rows.Scan(&hash, &fit); err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			result[hash] = fit
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+	}
+	return result, nil
+}
+
+// SaveStickerPersonaFit 记下一次人设判断。
+func (s *SQLiteStore) SaveStickerPersonaFit(ctx context.Context, personaKey, contentSHA256 string, fit bool, reason string) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	personaKey = strings.TrimSpace(personaKey)
+	hash := strings.ToLower(strings.TrimSpace(contentSHA256))
+	if personaKey == "" || !validStickerAssetHash(hash) {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO sticker_persona_fit (persona_key, content_sha256, fit, reason, updated_at) VALUES (?, ?, ?, ?, ?)
+ON CONFLICT(persona_key, content_sha256) DO UPDATE SET fit=excluded.fit, reason=excluded.reason, updated_at=excluded.updated_at
+`, personaKey, hash, fit, strings.TrimSpace(reason), time.Now().Unix())
 	return err
 }
 

@@ -33,6 +33,8 @@ const (
 	stickerMatchedPoolFactor = 2
 	stickerBackgroundTagTTL  = 3 * time.Minute
 	stickerSendRateWindow    = time.Hour
+	// 自动配图时最多拿几张命中的去过人设判断，每张第一次判断要调一次模型。
+	stickerPersonaAttempts = 3
 )
 
 type dianaStickerTool struct {
@@ -226,12 +228,16 @@ func (t *dianaStickerTool) sendBestMatch(ctx context.Context, query string) (boo
 	if err != nil {
 		return false, err
 	}
-	picked, matched := selectStickerCandidates(candidates, 1, time.Now().Unix(), secureRandomIndex)
-	if len(picked) == 0 || matched == 0 {
-		return false, nil
+	// 命中的前几张依次过人设这一关，第一张合适的发出去；都不合适就不发。
+	picked, matched := selectStickerCandidates(candidates, stickerPersonaAttempts, time.Now().Unix(), secureRandomIndex)
+	for _, candidate := range picked[:matched] {
+		if fit, _ := t.fitsPersona(ctx, candidate); !fit {
+			continue
+		}
+		reason, err := t.deliver(ctx, candidate)
+		return err == nil && reason == "", err
 	}
-	reason, err := t.deliver(ctx, picked[0])
-	return err == nil && reason == "", err
+	return false, nil
 }
 
 func (t *dianaStickerTool) rememberSearchCandidates(candidates []stickerCandidate) {
@@ -445,6 +451,7 @@ func (t *dianaStickerTool) candidates(ctx context.Context, query string) ([]stic
 			}
 		}
 	}
+	candidates = t.dropKnownUnfitStickers(ctx, candidates)
 	rankStickerCandidates(candidates, query, time.Now().Unix())
 	return candidates, nil
 }
