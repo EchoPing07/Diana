@@ -70,6 +70,14 @@ CREATE TABLE IF NOT EXISTS sticker_usage (
 `); err != nil {
 		return fmt.Errorf("create sticker asset index: %w", err)
 	}
+	// 标签按哪种看图方式标的：动图改成多帧分镜之前只看了第一帧，那些 GIF 的标签要重标。
+	if has, err := s.hasColumn("sticker_tags", "version"); err != nil {
+		return err
+	} else if !has {
+		if _, err := s.db.Exec(`ALTER TABLE sticker_tags ADD COLUMN version TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("add sticker tag version: %w", err)
+		}
+	}
 
 	var marker string
 	err := s.db.QueryRow(`SELECT value FROM app_state WHERE key = ?`, stickerAssetsBackfillKey).Scan(&marker)
@@ -247,6 +255,11 @@ func (s *SQLiteStore) ListStickerAssets(ctx context.Context, query assistant.Sti
 	return append(current, shared...), nil
 }
 
+// stickerTagCurrent 判断一行标签还算不算数：静态图的旧标签照用；GIF 以前只看了第一帧，
+// 只认按当前标注版本（多帧分镜）标过的。不算数的当作没标注，由检索时补标。
+const stickerTagCurrent = `(t.content_sha256 IS NOT NULL AND (COALESCE(t.version, '') = '` + assistant.StickerAnnotationVersion + `'
+  OR (LOWER(COALESCE(a.cached_mime, '')) <> 'image/gif' AND LOWER(a.cached_file) NOT LIKE '%.gif')))`
+
 // queryStickerAssets 顺带取出简介、标签和机器人在 currentSession 里的发送记录，
 // 候选排序和防重复都靠这几列，不必再逐张回查。
 func (s *SQLiteStore) queryStickerAssets(ctx context.Context, currentSession, where string, args []any, limit int) ([]assistant.StickerAsset, error) {
@@ -258,7 +271,8 @@ SELECT a.session, COALESCE(a.profile_id, ''), COALESCE(a.context_namespace, ''),
        COALESCE(a.group_id, ''), COALESCE(a.user_id, ''), COALESCE(a.message_id, ''),
        a.event_time, a.segment_index, COALESCE(a.summary, ''), a.cached_file,
        COALESCE(a.cached_mime, ''), a.content_sha256,
-       COALESCE(d.description, ''), t.content_sha256 IS NOT NULL, COALESCE(t.gist, ''), COALESCE(t.tags, ''),
+       COALESCE(d.description, ''), `+stickerTagCurrent+`, CASE WHEN `+stickerTagCurrent+` THEN COALESCE(t.gist, '') ELSE '' END,
+       CASE WHEN `+stickerTagCurrent+` THEN COALESCE(t.tags, '') ELSE '' END,
        COALESCE(u.sent_count, 0), COALESCE(u.last_sent_at, 0)
 FROM sticker_assets AS a
 LEFT JOIN image_descriptions AS d ON d.content_sha256 = a.content_sha256
@@ -340,9 +354,9 @@ func (s *SQLiteStore) SaveStickerTags(ctx context.Context, record assistant.Stic
 		return err
 	}
 	_, err = s.db.ExecContext(ctx, `
-INSERT INTO sticker_tags (content_sha256, gist, tags, updated_at) VALUES (?, ?, ?, ?)
-ON CONFLICT(content_sha256) DO UPDATE SET gist=excluded.gist, tags=excluded.tags, updated_at=excluded.updated_at
-`, hash, strings.TrimSpace(record.Gist), string(encoded), time.Now().Unix())
+INSERT INTO sticker_tags (content_sha256, gist, tags, version, updated_at) VALUES (?, ?, ?, ?, ?)
+ON CONFLICT(content_sha256) DO UPDATE SET gist=excluded.gist, tags=excluded.tags, version=excluded.version, updated_at=excluded.updated_at
+`, hash, strings.TrimSpace(record.Gist), string(encoded), strings.TrimSpace(record.Version), time.Now().Unix())
 	return err
 }
 

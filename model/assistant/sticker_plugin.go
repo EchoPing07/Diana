@@ -63,9 +63,9 @@ func (p *StickerPlugin) Manifest() PluginManifest {
 			{
 				Key:         stickerSettingHourlyLimit,
 				Label:       "每个会话每小时最多发几张",
-				Description: "同一个群聊或私聊在任意一小时内最多发几张表情包，到了上限这段时间只用文字回应。填 0 不限。",
+				Description: "同一个群聊或私聊在任意一小时内最多发几张表情包，到了上限这段时间只用文字回应。默认 0 不限；哪个会话发得太密再单独调。",
 				Type:        PluginSettingTypeNumber,
-				Default:     10,
+				Default:     0,
 				Min:         settingRange(0),
 				Max:         settingRange(120),
 			},
