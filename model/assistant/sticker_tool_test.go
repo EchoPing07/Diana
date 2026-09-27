@@ -851,3 +851,26 @@ func TestResolveOutgoingLocalImagesSharesStickerSegments(t *testing.T) {
 		t.Fatalf("telegram path changed: %#v", got.Segments[0].Data)
 	}
 }
+
+// 默认不限每小时张数：没配过设置的会话，连续多轮都能发（每轮仍然最多一张）。
+func TestStickerHourlyLimitDefaultsToUnlimited(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.gif")
+	body := []byte("default-unlimited")
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	event := MessageEvent{Kind: EventKindGroup, GroupID: "g-unlimited", UserID: "u", MessageID: "request"}
+	store := &stickerHistoryStore{events: map[string][]MessageEvent{sessionKey(event): {{
+		Kind: EventKindGroup, GroupID: "g-unlimited", MessageID: "s", Time: 1,
+		Segments: []MessageSegment{{Type: "image", Data: map[string]string{"summary": "[无语]", "cached_file": path, imageContentSHA256Key: imageBytesSHA256(body)}}},
+	}}}}
+	channel := &recordingChannel{}
+	runtime := NewRuntime(BotConfig{}, channel, NewPluginManager(), nil, nil, nil, nil)
+	runtime.SetMessageHistoryStore(store)
+	for turn := 0; turn < 15; turn++ {
+		_, sendOne := stickerLimitTestTool(t, runtime, event, nil)
+		if output := sendOne(); !strings.Contains(output, `"action":"sent"`) {
+			t.Fatalf("turn %d: %s", turn+1, output)
+		}
+	}
+}

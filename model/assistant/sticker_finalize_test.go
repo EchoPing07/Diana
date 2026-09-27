@@ -20,7 +20,9 @@ type stickerFinalizeLLMProvider struct {
 	sticker        string
 	personaVerdict string
 	silent         bool
+	order          string
 	sawField       bool
+	sawOrder       bool
 }
 
 func (p *stickerFinalizeLLMProvider) Generate(ctx context.Context, req llm.GenerateRequest) (*llm.GenerateResponse, error) {
@@ -39,9 +41,13 @@ func (p *stickerFinalizeLLMProvider) Generate(ctx context.Context, req llm.Gener
 		}
 		properties, _ := tool.Parameters["properties"].(map[string]any)
 		_, p.sawField = properties[stickerFinalizeFieldName]
+		_, p.sawOrder = properties[stickerOrderFieldName]
 		arguments := map[string]any{"content": response.Text}
 		if p.silent {
 			arguments = map[string]any{"content": "", "silent": true, "silent_reason": "一张图就够了"}
+		}
+		if p.order != "" {
+			arguments[stickerOrderFieldName] = p.order
 		}
 		if p.sticker != "" {
 			arguments[stickerFinalizeFieldName] = p.sticker
@@ -266,6 +272,43 @@ func TestReplySilentFinalizeSendsStickerOnly(t *testing.T) {
 		}
 		if len(sent) != 0 {
 			t.Fatalf("no match must stay silent: sent = %#v", sent)
+		}
+	}
+}
+
+// 表情包是第一反应时（sticker_order=before）先甩图再补一句，像真人一样；不填就先说完再甩图。
+func TestReplyFinalizeStickerOrderFollowsModelChoice(t *testing.T) {
+	withFastSendTiming(t)
+	path := filepath.Join(t.TempDir(), "shock.gif")
+	body := []byte("shock-sticker")
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, order := range []string{"before", ""} {
+		channel := &recordingChannel{}
+		provider := &stickerFinalizeLLMProvider{capturingLLMProvider: capturingLLMProvider{reply: "真的假的，你居然一次过了"}, sticker: "震惊 瞪眼", order: order, personaVerdict: "会"}
+		rt := NewRuntime(BotConfig{AgentEnabled: true}.WithDefaults(), channel, NewDefaultPluginManager(), nil, nil, nil, func() (LLMProvider, error) { return provider, nil })
+		event := MessageEvent{Kind: EventKindPrivate, UserID: "10001", MessageID: "order-" + order, RawMessage: "我驾照一次过了"}
+		rt.SetMessageHistoryStore(&stickerHistoryStore{events: map[string][]MessageEvent{sessionKey(event): {{
+			Kind: EventKindPrivate, UserID: "10001", MessageID: "s", Time: 1,
+			Segments: []MessageSegment{{Type: "image", Data: map[string]string{"summary": "[震惊]", "cached_file": path, imageContentSHA256Key: imageBytesSHA256(body)}}},
+		}}}})
+		if _, err := rt.replyTo(context.Background(), event, event.RawMessage); err != nil {
+			t.Fatal(err)
+		}
+		if !provider.sawOrder {
+			t.Fatal("agent_finalize did not offer sticker_order")
+		}
+		sent := channel.sentSnapshot()
+		if len(sent) != 2 {
+			t.Fatalf("order=%q sent = %#v", order, sent)
+		}
+		stickerIndex, textIndex := 1, 0
+		if order == "before" {
+			stickerIndex, textIndex = 0, 1
+		}
+		if sentStickerPath(sent[stickerIndex]) != path || sent[textIndex].Text == "" {
+			t.Fatalf("order=%q sent = %#v", order, sent)
 		}
 	}
 }

@@ -384,7 +384,7 @@ func (t *dianaStickerTool) sendLimitReason(now time.Time) string {
 	if turnLimit := t.settings.Int(stickerSettingTurnLimit, 1); sent >= turnLimit {
 		return fmt.Sprintf("这一轮已经发了 %d 张表情包，到了单轮上限；%s", sent, stickerLimitedHint)
 	}
-	hourly := t.settings.Int(stickerSettingHourlyLimit, 10)
+	hourly := t.settings.Int(stickerSettingHourlyLimit, 0)
 	if full, wait := t.runtime.stickerSends.full(sessionKey(t.event), now, hourly); full {
 		return fmt.Sprintf("这个会话最近一小时已发 %d 张表情包，到了上限，约 %d 分钟后才能再发；%s", hourly, int(math.Ceil(wait.Minutes())), stickerLimitedHint)
 	}
@@ -399,7 +399,7 @@ func (t *dianaStickerTool) reserveSend(now time.Time) (func(), string) {
 	if t.sentThisTurn >= turnLimit {
 		return nil, fmt.Sprintf("这一轮已经发了 %d 张表情包，到了单轮上限；%s", t.sentThisTurn, stickerLimitedHint)
 	}
-	hourly := t.settings.Int(stickerSettingHourlyLimit, 10)
+	hourly := t.settings.Int(stickerSettingHourlyLimit, 0)
 	releaseSlot, ok := t.runtime.stickerSends.reserve(sessionKey(t.event), now, hourly)
 	if !ok {
 		_, wait := t.runtime.stickerSends.full(sessionKey(t.event), now, hourly)
