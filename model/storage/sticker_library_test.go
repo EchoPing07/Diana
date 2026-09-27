@@ -201,3 +201,33 @@ func TestStickerAssetsIncludeLegacySessionKey(t *testing.T) {
 		t.Fatalf("after prune = %#v err=%v", assets, err)
 	}
 }
+
+// 人设判断按「人设指纹 + 图片」存取，人设不同互不影响，重判会覆盖。
+func TestStickerPersonaFitRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewSQLiteStore(filepath.Join(t.TempDir(), "sticker-persona.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	a, b := strings.Repeat("7", 64), strings.Repeat("8", 64)
+	if err := store.SaveStickerPersonaFit(ctx, "diana", a, false, "大叔口吻"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveStickerPersonaFit(ctx, "diana", b, true, ""); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.StickerPersonaFit(ctx, "diana", []string{a, b, strings.Repeat("9", 64)})
+	if err != nil || len(got) != 2 || got[a] || !got[b] {
+		t.Fatalf("got=%v err=%v", got, err)
+	}
+	if other, _ := store.StickerPersonaFit(ctx, "miku", []string{a}); len(other) != 0 {
+		t.Fatalf("verdict leaked across personas: %v", other)
+	}
+	if err := store.SaveStickerPersonaFit(ctx, "diana", a, true, ""); err != nil {
+		t.Fatal(err)
+	}
+	if again, _ := store.StickerPersonaFit(ctx, "diana", []string{a}); !again[a] {
+		t.Fatal("re-judgement did not overwrite")
+	}
+}

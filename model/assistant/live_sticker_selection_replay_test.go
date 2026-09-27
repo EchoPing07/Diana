@@ -297,6 +297,7 @@ func loadStickerSampleMeta(t *testing.T, dir string) map[string]stickerSampleMet
 //
 //	DIANA_STICKER_FINALIZE_RESULTS=<触发回放的结果 jsonl>  只看 variant=new 且填了 sticker 的
 //	DIANA_STICKER_REPLAY_DIR / DIANA_STICKER_SELECT_LIBRARY / DIANA_STICKER_SELECT_OUT 同挑图回放
+//	DIANA_STICKER_PERSONA_FILE=<SOUL.md>  设置后按线上顺序让命中的前几张过人设判断（要调模型，用 live 测试的环境变量）
 func TestLiveStickerFinalizePickReplay(t *testing.T) {
 	resultsPath := strings.TrimSpace(os.Getenv("DIANA_STICKER_FINALIZE_RESULTS"))
 	libraryPath := strings.TrimSpace(os.Getenv("DIANA_STICKER_SELECT_LIBRARY"))
@@ -316,6 +317,17 @@ func TestLiveStickerFinalizePickReplay(t *testing.T) {
 		library[index].Path = stub
 	}
 	metas := loadStickerSampleMeta(t, dir)
+	cfg := BotConfig{}
+	var provider LLMProviderFactory
+	if personaPath := strings.TrimSpace(os.Getenv("DIANA_STICKER_PERSONA_FILE")); personaPath != "" {
+		persona, err := os.ReadFile(personaPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg.SystemPrompt = string(persona)
+		client := stickerReplayClient(t)
+		provider = func() (LLMProvider, error) { return client, nil }
+	}
 	raw, err := os.ReadFile(resultsPath)
 	if err != nil {
 		t.Fatal(err)
@@ -331,6 +343,8 @@ func TestLiveStickerFinalizePickReplay(t *testing.T) {
 		Description string `json:"description,omitempty"`
 		Hash        string `json:"hash,omitempty"`
 		Path        string `json:"path,omitempty"`
+		// Rejected 是过人设判断时被拒的候选，按判断顺序。
+		Rejected []rejectedSticker `json:"rejected,omitempty"`
 	}
 	var picks []pick
 	for _, line := range strings.Split(string(raw), "\n") {
@@ -359,17 +373,29 @@ func TestLiveStickerFinalizePickReplay(t *testing.T) {
 			}
 		}
 		store := &stickerAssetTestStore{stickerHistoryStore: stickerHistoryStore{events: map[string][]MessageEvent{}}, assets: assets}
-		runtime := NewRuntime(BotConfig{}, &recordingChannel{}, NewPluginManager(), nil, nil, nil, nil)
+		runtime := NewRuntime(cfg, &recordingChannel{}, NewPluginManager(), nil, nil, nil, provider)
 		runtime.SetMessageHistoryStore(stickerSearchOnlyStore{store})
 		tool := newDianaStickerTool(runtime, event, nil)
 		candidates, err := tool.candidates(context.Background(), keywords)
 		if err != nil {
 			t.Fatal(err)
 		}
-		picked, matched := selectStickerCandidates(candidates, 1, time.Now().Unix(), secureRandomIndex)
+		// 与 sendBestMatch 同一个顺序：命中的前几张依次过人设，第一张合适的发出。
+		attempts := 1
+		if provider != nil {
+			attempts = stickerPersonaAttempts
+		}
+		picked, matched := selectStickerCandidates(candidates, attempts, time.Now().Unix(), secureRandomIndex)
 		out := pick{ID: result.ID, Run: result.Run, Keywords: keywords, Reply: reply, Library: len(assets), Matched: matched}
-		if matched > 0 && len(picked) > 0 {
-			out.Name, out.Description, out.Hash, out.Path = picked[0].Summary, picked[0].Description, picked[0].Hash, remotePaths[picked[0].Hash]
+		for _, candidate := range picked[:matched] {
+			if provider != nil {
+				if fit, reason := tool.fitsPersona(context.Background(), candidate); !fit {
+					out.Rejected = append(out.Rejected, rejectedSticker{Name: candidate.Summary, Description: candidate.Description, Hash: candidate.Hash, Path: remotePaths[candidate.Hash], Reason: reason})
+					continue
+				}
+			}
+			out.Name, out.Description, out.Hash, out.Path = candidate.Summary, candidate.Description, candidate.Hash, remotePaths[candidate.Hash]
+			break
 		}
 		picks = append(picks, out)
 	}
@@ -391,6 +417,14 @@ func TestLiveStickerFinalizePickReplay(t *testing.T) {
 		}
 		_ = file.Close()
 	}
+}
+
+type rejectedSticker struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Hash        string `json:"hash"`
+	Path        string `json:"path"`
+	Reason      string `json:"reason"`
 }
 
 // finalizeStickerFromCalls 从触发回放记下的调用摘要里取出收尾的 sticker 关键词和正文。
