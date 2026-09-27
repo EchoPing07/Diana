@@ -298,6 +298,7 @@ func loadStickerSampleMeta(t *testing.T, dir string) map[string]stickerSampleMet
 //	DIANA_STICKER_FINALIZE_RESULTS=<触发回放的结果 jsonl>  只看 variant=new 且填了 sticker 的
 //	DIANA_STICKER_REPLAY_DIR / DIANA_STICKER_SELECT_LIBRARY / DIANA_STICKER_SELECT_OUT 同挑图回放
 //	DIANA_STICKER_PERSONA_FILE=<SOUL.md>  设置后按线上顺序让命中的前几张过人设判断（要调模型，用 live 测试的环境变量）
+//	DIANA_STICKER_PERSONA_FROM_SAMPLE=1   人设改用样本录制时实际生效的那份（主回复第二条系统消息，群配置会覆盖 SOUL.md）
 func TestLiveStickerFinalizePickReplay(t *testing.T) {
 	resultsPath := strings.TrimSpace(os.Getenv("DIANA_STICKER_FINALIZE_RESULTS"))
 	libraryPath := strings.TrimSpace(os.Getenv("DIANA_STICKER_SELECT_LIBRARY"))
@@ -327,6 +328,14 @@ func TestLiveStickerFinalizePickReplay(t *testing.T) {
 		cfg.SystemPrompt = string(persona)
 		client := stickerReplayClient(t)
 		provider = func() (LLMProvider, error) { return client, nil }
+	}
+	samplePersonas := map[string]string{}
+	if provider != nil && os.Getenv("DIANA_STICKER_PERSONA_FROM_SAMPLE") == "1" {
+		for _, sample := range loadStickerReplaySamples(t, dir, 0) {
+			if len(sample.request.Messages) > 1 && sample.request.Messages[1].Role == llm.RoleSystem {
+				samplePersonas[sample.id] = sample.request.Messages[1].Content
+			}
+		}
 	}
 	raw, err := os.ReadFile(resultsPath)
 	if err != nil {
@@ -373,7 +382,11 @@ func TestLiveStickerFinalizePickReplay(t *testing.T) {
 			}
 		}
 		store := &stickerAssetTestStore{stickerHistoryStore: stickerHistoryStore{events: map[string][]MessageEvent{}}, assets: assets}
-		runtime := NewRuntime(cfg, &recordingChannel{}, NewPluginManager(), nil, nil, nil, provider)
+		sampleCfg := cfg
+		if persona := samplePersonas[result.ID]; persona != "" {
+			sampleCfg.SystemPrompt = persona
+		}
+		runtime := NewRuntime(sampleCfg, &recordingChannel{}, NewPluginManager(), nil, nil, nil, provider)
 		runtime.SetMessageHistoryStore(stickerSearchOnlyStore{store})
 		tool := newDianaStickerTool(runtime, event, nil)
 		candidates, err := tool.candidates(context.Background(), keywords)
