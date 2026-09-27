@@ -20,8 +20,9 @@ const stickerFinalizeFieldName = "sticker"
 func stickerFinalizeField() agent.FinalizeField {
 	return agent.FinalizeField{
 		Name: stickerFinalizeFieldName,
-		Description: "想在这句回复后面配一张表情包时，填 2 到 6 个空格分隔的短关键词（情绪、动作、场景和同义说法），例如“得意 叉腰”“晚安 摸头”。" +
-			"正文发出后会自动挑一张贴切的跟在后面，挑不到就不发。只在闲聊、接梗、调侃、吐槽、安慰、庆祝、道谢、道晚安这类以情绪为主的接话里填；认真回答问题、做任务时留空。",
+		Description: "想配一张表情包时，填 2 到 6 个空格分隔的短关键词（情绪、动作、场景和同义说法），例如“得意 叉腰”“晚安 摸头”。" +
+			"有正文时，正文发出后自动跟一张贴切的；一张图就够、不想说话时，填 silent=true、content 留空，只回这张表情包。挑不到就不发，也不会补文字。" +
+			"只在闲聊、接梗、调侃、吐槽、安慰、庆祝、道谢、道晚安这类以情绪为主的接话里填；认真回答问题、做任务时留空。",
 	}
 }
 

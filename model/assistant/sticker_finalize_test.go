@@ -5,6 +5,7 @@ package assistant
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,6 +19,7 @@ type stickerFinalizeLLMProvider struct {
 	capturingLLMProvider
 	sticker        string
 	personaVerdict string
+	silent         bool
 	sawField       bool
 }
 
@@ -38,6 +40,9 @@ func (p *stickerFinalizeLLMProvider) Generate(ctx context.Context, req llm.Gener
 		properties, _ := tool.Parameters["properties"].(map[string]any)
 		_, p.sawField = properties[stickerFinalizeFieldName]
 		arguments := map[string]any{"content": response.Text}
+		if p.silent {
+			arguments = map[string]any{"content": "", "silent": true, "silent_reason": "一张图就够了"}
+		}
 		if p.sticker != "" {
 			arguments[stickerFinalizeFieldName] = p.sticker
 		}
@@ -228,4 +233,39 @@ func (p *stickerReannotateProvider) Generate(_ context.Context, req llm.Generate
 	}
 	p.annotations++
 	return &llm.GenerateResponse{Text: p.annotation}, nil
+}
+
+// 一张图就够、不想说话：静默收尾加 sticker 只回一张表情包；挑不到就什么都不发，也不补兜底文字。
+func TestReplySilentFinalizeSendsStickerOnly(t *testing.T) {
+	withFastSendTiming(t)
+	path := filepath.Join(t.TempDir(), "night.gif")
+	body := []byte("night-sticker")
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, keywords := range []string{"晚安 摸头", "斗图 翻白眼"} {
+		channel := &recordingChannel{}
+		provider := &stickerFinalizeLLMProvider{capturingLLMProvider: capturingLLMProvider{reply: "晚安"}, sticker: keywords, silent: true, personaVerdict: "会"}
+		rt := NewRuntime(BotConfig{AgentEnabled: true}.WithDefaults(), channel, NewDefaultPluginManager(), nil, nil, nil, func() (LLMProvider, error) { return provider, nil })
+		event := MessageEvent{Kind: EventKindPrivate, UserID: "10001", MessageID: "night-" + keywords, RawMessage: "晚安啦"}
+		rt.SetMessageHistoryStore(&stickerHistoryStore{events: map[string][]MessageEvent{sessionKey(event): {{
+			Kind: EventKindPrivate, UserID: "10001", MessageID: "s", Time: 1,
+			Segments: []MessageSegment{{Type: "image", Data: map[string]string{"summary": "[晚安]", "cached_file": path, imageContentSHA256Key: imageBytesSHA256(body)}}},
+		}}}})
+		_, err := rt.replyTo(context.Background(), event, event.RawMessage)
+		var silent *modelSilentFinishError
+		if !errors.As(err, &silent) {
+			t.Fatalf("%s: err = %v, want silent finish", keywords, err)
+		}
+		sent := channel.sentSnapshot()
+		if keywords == "晚安 摸头" {
+			if len(sent) != 1 || sent[0].Text != "" || sentStickerPath(sent[0]) != path {
+				t.Fatalf("sticker-only: sent = %#v", sent)
+			}
+			continue
+		}
+		if len(sent) != 0 {
+			t.Fatalf("no match must stay silent: sent = %#v", sent)
+		}
+	}
 }
