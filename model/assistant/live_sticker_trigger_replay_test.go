@@ -311,6 +311,29 @@ func stickerReplayVariant(req llm.GenerateRequest, variant string) llm.GenerateR
 	}
 	if variant == "new" {
 		system += "\n" + promptToolSticker
+		// 线上现在让模型收尾时顺手填 sticker，见 sticker_finalize.go；回放请求里的收尾
+		// 工具是录制时的旧定义，要补上这个字段。
+		tools := append([]llm.ToolDefinition(nil), req.Tools...)
+		for index := range tools {
+			if tools[index].Name != "agent_finalize" {
+				continue
+			}
+			parameters := map[string]any{}
+			for key, value := range tools[index].Parameters {
+				parameters[key] = value
+			}
+			properties := map[string]any{}
+			if existing, ok := parameters["properties"].(map[string]any); ok {
+				for key, value := range existing {
+					properties[key] = value
+				}
+			}
+			field := stickerFinalizeField()
+			properties[field.Name] = toolStringParam(field.Description)
+			parameters["properties"] = properties
+			tools[index].Parameters = parameters
+		}
+		req.Tools = tools
 	}
 	messages[0].Content = system
 	req.Messages = messages
@@ -326,6 +349,10 @@ func stickerReplayTriggered(response *llm.GenerateResponse) (bool, string) {
 		switch call.Name {
 		case dianaStickerToolName:
 			triggered = true
+		case "agent_finalize":
+			if keywords, _ := call.Arguments[stickerFinalizeFieldName].(string); strings.TrimSpace(keywords) != "" {
+				triggered = true
+			}
 		case agent.ToolsLoadToolName, "tools_execute":
 			if strings.Contains(string(encoded), `"`+dianaStickerToolName+`"`) {
 				triggered = true

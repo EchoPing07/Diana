@@ -178,30 +178,60 @@ func (t *dianaStickerTool) Run(ctx context.Context, input map[string]any) (strin
 			}
 			selected = &picked[0]
 		}
-		if _, err := os.Stat(selected.Path); err != nil {
-			return "", fmt.Errorf("表情包缓存文件不可用: %w", err)
-		}
-		if selected.Hash != "" && !stickerFileMatchesHash(selected.Path, selected.Hash) {
-			return "", fmt.Errorf("表情包缓存内容校验失败")
-		}
-		release, reason := t.reserveSend(time.Now())
-		if reason != "" {
+		if reason, err := t.deliver(ctx, *selected); err != nil {
+			return "", err
+		} else if reason != "" {
 			return marshalStickerResult(stickerToolResult{Action: "limited", Message: reason, Query: query})
 		}
-		label := "表情包"
-		if name := firstNonEmpty(selected.Summary, truncateRunes(selected.Description, 60)); name != "" {
-			label += "：" + name
-		}
-		if err := t.runtime.sendOutgoing(ctx, t.event, routeOutgoingToEvent(t.event, OutgoingMessage{ImageURLs: []string{selected.Path}, ImageLabels: []string{label}})); err != nil {
-			release()
-			return "", fmt.Errorf("发送表情包失败: %w", err)
-		}
-		t.recordSent(ctx, *selected)
 		item := stickerSearchItems([]stickerCandidate{*selected})[0]
 		return marshalStickerResult(stickerToolResult{OK: true, Action: "sent", Message: "表情包已发送。", Query: query, Sent: &item})
 	default:
 		return "", fmt.Errorf("operation 必须是 search 或 send")
 	}
+}
+
+// deliver 发出一张选好的表情包：校验缓存文件、占发送名额、发送、记账。到了发送上限时
+// 返回给 Agent 的说明（不是错误），发送失败会退回名额。
+func (t *dianaStickerTool) deliver(ctx context.Context, selected stickerCandidate) (string, error) {
+	if _, err := os.Stat(selected.Path); err != nil {
+		return "", fmt.Errorf("表情包缓存文件不可用: %w", err)
+	}
+	if selected.Hash != "" && !stickerFileMatchesHash(selected.Path, selected.Hash) {
+		return "", fmt.Errorf("表情包缓存内容校验失败")
+	}
+	release, reason := t.reserveSend(time.Now())
+	if reason != "" {
+		return reason, nil
+	}
+	label := "表情包"
+	if name := firstNonEmpty(selected.Summary, truncateRunes(selected.Description, 60)); name != "" {
+		label += "：" + name
+	}
+	if err := t.runtime.sendOutgoing(ctx, t.event, routeOutgoingToEvent(t.event, OutgoingMessage{ImageURLs: []string{selected.Path}, ImageLabels: []string{label}})); err != nil {
+		release()
+		return "", fmt.Errorf("发送表情包失败: %w", err)
+	}
+	t.recordSent(ctx, selected)
+	return "", nil
+}
+
+// sendBestMatch 按收尾时模型填的关键词直接配一张：只在有关键词命中时发，随机补位的
+// 候选不发——这时没有模型再看一眼，宁可不发也别配错。发了返回 true。
+func (t *dianaStickerTool) sendBestMatch(ctx context.Context, query string) (bool, error) {
+	query = strings.TrimSpace(query)
+	if query == "" || t.sendLimitReason(time.Now()) != "" {
+		return false, nil
+	}
+	candidates, err := t.candidates(ctx, query)
+	if err != nil {
+		return false, err
+	}
+	picked, matched := selectStickerCandidates(candidates, 1, time.Now().Unix(), secureRandomIndex)
+	if len(picked) == 0 || matched == 0 {
+		return false, nil
+	}
+	reason, err := t.deliver(ctx, picked[0])
+	return err == nil && reason == "", err
 }
 
 func (t *dianaStickerTool) rememberSearchCandidates(candidates []stickerCandidate) {
