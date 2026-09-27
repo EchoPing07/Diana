@@ -1012,12 +1012,41 @@ func withoutMessageImageURLs(imageURLs []string, messages []llm.Message) []strin
 // 上时根本读不到——合并转发、暂存、散装三条路挨个失败,重试耗尽后整条事件
 // 被丢弃。换不成时保留原路径,桥与宿主同机的部署行为不变。
 func (r *Runtime) resolveOutgoingLocalImages(msg OutgoingMessage) OutgoingMessage {
-	if len(msg.ImageURLs) == 0 {
+	if len(msg.ImageURLs) == 0 && len(msg.Segments) == 0 {
 		return msg
 	}
 	// TelegramChannel 与后端在同一进程，绝对路径应直接走 multipart 上传；换成
 	// WebUI 分享 URL 后 Telegram 服务器可能拿到登录页或代理错误页并报媒体类型错误。
 	if NormalizePlatformID(msg.Platform) == PlatformTelegram {
+		return msg
+	}
+	// 图片消息段（例如按 QQ 表情包形式发的 sub_type=1）里的本地路径同样要换成分享地址：
+	// 接入端多跑在容器里，读不到宿主机上的文件。
+	var segments []MessageSegment
+	for index, segment := range msg.Segments {
+		if segment.Type != "image" {
+			continue
+		}
+		path := localMediaPath(segment.Data["file"])
+		if path == "" {
+			continue
+		}
+		sharedURL, ok := r.shareLocalMedia(path)
+		if !ok {
+			continue
+		}
+		if segments == nil {
+			segments = append([]MessageSegment(nil), msg.Segments...)
+		}
+		data := cloneSegmentData(segment.Data)
+		data["file"] = sharedURL
+		delete(data, "cached_file")
+		segments[index].Data = data
+	}
+	if segments != nil {
+		msg.Segments = segments
+	}
+	if len(msg.ImageURLs) == 0 {
 		return msg
 	}
 	resolved := make([]string, 0, len(msg.ImageURLs))

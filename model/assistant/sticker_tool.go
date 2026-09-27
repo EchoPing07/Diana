@@ -193,7 +193,7 @@ func (t *dianaStickerTool) Run(ctx context.Context, input map[string]any) (strin
 			return marshalStickerResult(stickerToolResult{Action: "limited", Message: reason, Query: query})
 		}
 		item := stickerSearchItems([]stickerCandidate{*selected})[0]
-		return marshalStickerResult(stickerToolResult{OK: true, Action: "sent", Message: "表情包已发送。", Query: query, Sent: &item})
+		return marshalStickerResult(stickerToolResult{OK: true, Action: "sent", Message: "表情包已经发出去了，在聊天里排在你收尾的文字前面：收尾别再写「来啦」「接好」「给你」这类预告，要说就接一句承接它的话，没什么要补的就 silent=true。", Query: query, Sent: &item})
 	default:
 		return "", fmt.Errorf("operation 必须是 search 或 send")
 	}
@@ -212,16 +212,32 @@ func (t *dianaStickerTool) deliver(ctx context.Context, selected stickerCandidat
 	if reason != "" {
 		return reason, nil
 	}
-	label := "表情包"
-	if name := firstNonEmpty(selected.Summary, truncateRunes(selected.Description, 60)); name != "" {
-		label += "：" + name
-	}
-	if err := t.runtime.sendOutgoing(ctx, t.event, routeOutgoingToEvent(t.event, OutgoingMessage{ImageURLs: []string{selected.Path}, ImageLabels: []string{label}})); err != nil {
+	if err := t.runtime.sendOutgoing(ctx, t.event, routeOutgoingToEvent(t.event, stickerOutgoingMessage(t.runtime.currentPlatform(t.event), selected))); err != nil {
 		release()
 		return "", fmt.Errorf("发送表情包失败: %w", err)
 	}
 	t.recordSent(ctx, selected)
 	return "", nil
+}
+
+// stickerOutgoingMessage 在 QQ 上按表情包发：图片消息段带 sub_type=1 和 summary，
+// 对方看到的是小尺寸的表情、能直接添加到表情，而不是一张大图。收到的表情包就是这个
+// 形状（SnowLuma/NapCat 都这样上报），发送时两个字段同样生效。其他平台照旧按图片发。
+func stickerOutgoingMessage(platform string, selected stickerCandidate) OutgoingMessage {
+	name := firstNonEmpty(selected.Summary, "动画表情")
+	if IsOneBotPlatform(platform) {
+		return OutgoingMessage{Segments: []MessageSegment{{Type: "image", Data: map[string]string{
+			// 不带 cached_file：组装 OneBot 消息时它会盖掉 file，把发送前换好的分享地址又换回
+			// 宿主机路径。带上哈希：这条消息进聊天记录后还会被认成表情包，按哈希才能认出是同一张。
+			"file": selected.Path, "sub_type": "1", "summary": "[" + name + "]",
+			imageContentSHA256Key: selected.Hash,
+		}}}}
+	}
+	label := "表情包"
+	if described := firstNonEmpty(selected.Summary, truncateRunes(selected.Description, 60)); described != "" {
+		label += "：" + described
+	}
+	return OutgoingMessage{ImageURLs: []string{selected.Path}, ImageLabels: []string{label}}
 }
 
 // sendBestMatch 按收尾时模型填的关键词直接配一张：只在有关键词命中时发，随机补位的
@@ -238,6 +254,13 @@ func (t *dianaStickerTool) sendBestMatch(ctx context.Context, query string) (boo
 	// 命中的前几张依次过人设这一关，第一张合适的发出去；都不合适就不发。
 	picked, matched := selectStickerCandidates(candidates, stickerPersonaAttempts, time.Now().Unix(), secureRandomIndex)
 	for _, candidate := range picked[:matched] {
+		// 还没按当前方式标注过的（多是以前只看了第一帧的 GIF），发之前先当场重看一遍，
+		// 重看后关键词对不上就换下一张：线上就有第一帧像睡觉、整段不是的动图被当成晚安图发出去。
+		if candidate.FromAssets && !candidate.Tagged && t.runtime.stickerTagStore() != nil {
+			if !t.annotateNow(ctx, &candidate) || !stickerMatchesQuery(candidate, query) {
+				continue
+			}
+		}
 		if fit, _ := t.fitsPersona(ctx, candidate); !fit {
 			continue
 		}
@@ -245,6 +268,32 @@ func (t *dianaStickerTool) sendBestMatch(ctx context.Context, query string) (boo
 		return err == nil && reason == "", err
 	}
 	return false, nil
+}
+
+// annotateNow 当场给一张候选重做表情包标注（动图按多帧分镜看），更新候选并存下标签。
+func (t *dianaStickerTool) annotateNow(ctx context.Context, candidate *stickerCandidate) bool {
+	annotation, err := t.runtime.describeStickerImage(ctx, t.event, candidate.Path)
+	if err != nil {
+		log.Printf("diana sticker annotate failed: %v", err)
+		return false
+	}
+	gist, tags := parseStickerAnnotation(annotation)
+	candidate.Description = compactRecallImageDescription(gist)
+	candidate.Tags = tags
+	candidate.Tagged = true
+	t.runtime.saveStickerTags(candidate.Hash, candidate.Description, tags)
+	return true
+}
+
+// stickerMatchesQuery 看重新标注后的候选还能不能对上任何一个关键词。
+func stickerMatchesQuery(candidate stickerCandidate, query string) bool {
+	text := strings.ToLower(candidate.Summary + "\n" + strings.Join(candidate.Tags, "\n") + "\n" + candidate.Description)
+	for _, term := range stickerQueryTerms(query) {
+		if strings.Contains(text, term) {
+			return true
+		}
+	}
+	return false
 }
 
 func (t *dianaStickerTool) rememberSearchCandidates(candidates []stickerCandidate) {
@@ -824,7 +873,7 @@ func (r *Runtime) saveStickerTags(hash, gist string, tags []string) {
 	}
 	saveCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if err := store.SaveStickerTags(saveCtx, StickerTagRecord{ContentSHA256: hash, Gist: gist, Tags: tags}); err != nil {
+	if err := store.SaveStickerTags(saveCtx, StickerTagRecord{ContentSHA256: hash, Gist: gist, Tags: tags, Version: stickerAnnotationVersion}); err != nil {
 		log.Printf("diana sticker tags save failed: %v", err)
 	}
 }

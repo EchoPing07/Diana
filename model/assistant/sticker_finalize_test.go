@@ -72,12 +72,12 @@ func TestReplyFinalizeStickerFollowsText(t *testing.T) {
 		}
 		sent := channel.sentSnapshot()
 		if sticker == "" {
-			if len(sent) != 1 || len(sent[0].ImageURLs) != 0 {
+			if len(sent) != 1 || sentStickerPath(sent[0]) != "" {
 				t.Fatalf("no keywords: sent = %#v", sent)
 			}
 			continue
 		}
-		if len(sent) != 2 || sent[0].Text == "" || len(sent[1].ImageURLs) != 1 || sent[1].ImageURLs[0] != path {
+		if len(sent) != 2 || sent[0].Text == "" || sentStickerPath(sent[1]) != path {
 			t.Fatalf("with keywords: sent = %#v", sent)
 		}
 	}
@@ -122,8 +122,8 @@ func TestStickerSendBestMatchChecksPersona(t *testing.T) {
 	}
 	event := MessageEvent{Kind: EventKindGroup, GroupID: "g", UserID: "u", MessageID: "m"}
 	store := &stickerPersonaTestStore{stickerAssetTestStore: stickerAssetTestStore{stickerHistoryStore: stickerHistoryStore{events: map[string][]MessageEvent{}}, assets: []StickerAsset{
-		{Session: sessionKey(event), Kind: EventKindGroup, GroupID: "g", MessageID: "a", EventTime: 2, Summary: "动画表情", Path: crude, ContentSHA256: imageBytesSHA256([]byte("crude")), Description: "大叔猥琐地说“晚安宝贝来我被窝”"},
-		{Session: sessionKey(event), Kind: EventKindGroup, GroupID: "g", MessageID: "b", EventTime: 1, Summary: "动画表情", Path: cute, ContentSHA256: imageBytesSHA256([]byte("cute")), Description: "小猫抱着枕头说“晚安”"},
+		{Session: sessionKey(event), Kind: EventKindGroup, GroupID: "g", MessageID: "a", EventTime: 2, Summary: "动画表情", Path: crude, ContentSHA256: imageBytesSHA256([]byte("crude")), Tagged: true, Description: "大叔猥琐地说“晚安宝贝来我被窝”"},
+		{Session: sessionKey(event), Kind: EventKindGroup, GroupID: "g", MessageID: "b", EventTime: 1, Summary: "动画表情", Path: cute, ContentSHA256: imageBytesSHA256([]byte("cute")), Tagged: true, Description: "小猫抱着枕头说“晚安”"},
 	}}, verdicts: map[string]bool{}}
 	channel := &recordingChannel{}
 	judge := &stickerPersonaJudge{}
@@ -134,7 +134,7 @@ func TestStickerSendBestMatchChecksPersona(t *testing.T) {
 	if err != nil || !sent {
 		t.Fatalf("sent=%v err=%v", sent, err)
 	}
-	if got := channel.sentSnapshot(); len(got) != 1 || got[0].ImageURLs[0] != cute {
+	if got := channel.sentSnapshot(); len(got) != 1 || sentStickerPath(got[0]) != cute {
 		t.Fatalf("sent = %#v", got)
 	}
 	if fit, judged := store.verdicts[imageBytesSHA256([]byte("crude"))]; !judged || fit {
@@ -189,4 +189,43 @@ func TestParseStickerPersonaVerdict(t *testing.T) {
 			t.Errorf("%q → %v, want %v", raw, got, want)
 		}
 	}
+}
+
+// 没按多帧标注过的候选（以前只看第一帧的 GIF），自动配图前先当场重看；重看后关键词对不上就不发。
+func TestStickerSendBestMatchReannotatesStaleCandidate(t *testing.T) {
+	path, hash := writeRecallImageFixture(t)
+	event := MessageEvent{Kind: EventKindGroup, GroupID: "g", UserID: "u", MessageID: "m"}
+	store := &stickerPersonaTestStore{stickerAssetTestStore: stickerAssetTestStore{stickerHistoryStore: stickerHistoryStore{events: map[string][]MessageEvent{}}, assets: []StickerAsset{
+		{Session: sessionKey(event), Kind: EventKindGroup, GroupID: "g", MessageID: "a", EventTime: 1, Summary: "动画表情", Path: path, ContentSHA256: hash, Description: "人物侧卧在床上闭着眼睛，像在睡觉"},
+	}}, verdicts: map[string]bool{}}
+	channel := &recordingChannel{}
+	vision := &stickerReannotateProvider{annotation: "角色趴在床上一直扭动身体，带点暗示。 标签：趴着、扭动、床"}
+	rt := NewRuntime(BotConfig{}, channel, NewPluginManager(), nil, nil, nil, func() (LLMProvider, error) { return vision, nil })
+	rt.SetMessageHistoryStore(store)
+	tool := newDianaStickerTool(rt, event, nil)
+	sent, err := tool.sendBestMatch(context.Background(), "晚安 睡觉")
+	if err != nil || sent || len(channel.sentSnapshot()) != 0 {
+		t.Fatalf("stale sticker sent after re-annotation: sent=%v err=%v", sent, err)
+	}
+	if tags, ok := store.taggedSnapshot(hash); !ok || strings.Join(tags, "|") != "趴着|扭动|床" {
+		t.Fatalf("re-annotation not saved: %v %v", tags, ok)
+	}
+	if vision.annotations != 1 {
+		t.Fatalf("annotations = %d", vision.annotations)
+	}
+}
+
+// stickerReannotateProvider 对表情包标注请求回固定标注，对人设判断回「会」。
+type stickerReannotateProvider struct {
+	annotation  string
+	annotations int
+}
+
+func (p *stickerReannotateProvider) Generate(_ context.Context, req llm.GenerateRequest) (*llm.GenerateResponse, error) {
+	last := req.Messages[len(req.Messages)-1].Content
+	if strings.Contains(last, "合不合你的人设") {
+		return &llm.GenerateResponse{Text: "会"}, nil
+	}
+	p.annotations++
+	return &llm.GenerateResponse{Text: p.annotation}, nil
 }
