@@ -821,6 +821,12 @@ type BotConfig struct {
 	// （见 RelationshipPolicy.allowedAgentToolNames），群成员拿不到这组工具，只有
 	// 主人能驱动它；用户按下接管时连主人也当场失效。
 	AgentBrowserBoxDisabled bool `json:"agent_browser_box_disabled,omitempty"`
+
+	// Weixin* 全部由扫码登录写入，界面不能手填：token 只有腾讯服务端发得出来。
+	WeixinBotToken string `json:"weixin_bot_token,omitempty"`
+	WeixinBotID    string `json:"weixin_bot_id,omitempty"`
+	WeixinBaseURL  string `json:"weixin_base_url,omitempty"`
+	WeixinUserID   string `json:"weixin_user_id,omitempty"`
 }
 
 type ModelRole struct {
@@ -1253,6 +1259,12 @@ type ConfigPayload struct {
 	AgentBrowserTimeoutMS           int                       `json:"agent_browser_timeout_ms,omitempty"`
 	AgentBrowserControlEnabled      bool                      `json:"agent_browser_control_enabled,omitempty"`
 	AgentBrowserBoxDisabled         bool                      `json:"agent_browser_box_disabled,omitempty"`
+
+	// 微信只回显绑定的是哪个号；token 只在显式索取时回传，保存时永远不从 payload 读。
+	WeixinBotID              string `json:"weixin_bot_id,omitempty"`
+	WeixinUserID             string `json:"weixin_user_id,omitempty"`
+	WeixinBotToken           string `json:"weixin_bot_token,omitempty"`
+	WeixinBotTokenConfigured bool   `json:"weixin_bot_token_configured,omitempty"`
 }
 
 // DefaultGroupConfig 返回指定群的默认行为配置，只包含群作用域字段。
@@ -1620,6 +1632,7 @@ var (
 	ErrInvalidWeComAgentID        = errors.New("assistant: wecom agent id must be numeric")
 	ErrMissingWeComCallbackKeys   = errors.New("assistant: wecom token and encoding aes key are required to receive messages")
 	ErrInvalidFeishuAPIBase       = errors.New("assistant: feishu api base url must be http(s)")
+	ErrInvalidWeixinBaseURL       = errors.New("assistant: weixin base url must be an https weixin.qq.com address")
 )
 
 // NewProfileSet 基于单个机器人配置创建配置集。
@@ -2229,6 +2242,13 @@ func (cfg BotConfig) Validate() error {
 			return ErrMissingWeComCallbackKeys
 		}
 		return nil
+	case PlatformWeixin:
+		// 不要求先有 token：扫码要挂在一台已保存的机器人上，得先能存下来才能扫。
+		// 没登录时通道只挂着并在状态里提示去扫码。
+		if base := strings.TrimSpace(cfg.WeixinBaseURL); base != "" && !weixinTrustedBaseURL(base) {
+			return ErrInvalidWeixinBaseURL
+		}
+		return nil
 	}
 
 	if cfg.OneBotTransport == OneBotTransportHTTP {
@@ -2452,6 +2472,11 @@ func PayloadFromConfig(cfg BotConfig) ConfigPayload {
 		AgentBrowserTimeoutMS:             cfg.AgentBrowserTimeoutMS,
 		AgentBrowserControlEnabled:        cfg.AgentBrowserControlEnabled,
 		AgentBrowserBoxDisabled:           cfg.AgentBrowserBoxDisabled,
+
+		// 微信只回显绑定的是哪个号，token 只在显式索取时回传。
+		WeixinBotID:              cfg.WeixinBotID,
+		WeixinUserID:             cfg.WeixinUserID,
+		WeixinBotTokenConfigured: cfg.WeixinBotToken != "",
 	}
 }
 
@@ -2474,6 +2499,7 @@ func PayloadFromConfigWithSecrets(cfg BotConfig) ConfigPayload {
 	payload.WeComSecret = cfg.WeComSecret
 	payload.WeComToken = cfg.WeComToken
 	payload.WeComEncodingAESKey = cfg.WeComEncodingAESKey
+	payload.WeixinBotToken = cfg.WeixinBotToken
 	return payload
 }
 
@@ -2702,6 +2728,12 @@ func ConfigFromPayload(payload ConfigPayload, existing BotConfig) BotConfig {
 	if cfg.WeComEncodingAESKey == "" {
 		cfg.WeComEncodingAESKey = existing.WeComEncodingAESKey
 	}
+	// 微信凭据只认扫码结果：payload 里就算带了也不采信，免得前端回传的旧值或
+	// 空值把刚扫出来的登录覆盖掉。解绑走单独的接口。
+	cfg.WeixinBotToken = existing.WeixinBotToken
+	cfg.WeixinBotID = existing.WeixinBotID
+	cfg.WeixinBaseURL = existing.WeixinBaseURL
+	cfg.WeixinUserID = existing.WeixinUserID
 	// 界面保存出来的配置一律是迁移过的：Agent 恒开，模式二选一。
 	return migrateAgentMode(cfg)
 }
