@@ -339,7 +339,7 @@ func TestRuntimeAgentCanCreateNaturalLanguageReminder(t *testing.T) {
 
 func TestScheduleSupportsOneMinutePolling(t *testing.T) {
 	interval, err := parseScheduleInterval("1m")
-	if err != nil || interval != time.Minute {
+	if err != nil || interval.Fixed != time.Minute || interval.Months != 0 {
 		t.Fatalf("interval=%s err=%v", interval, err)
 	}
 	if _, err := parseScheduleInterval("59s"); err == nil {

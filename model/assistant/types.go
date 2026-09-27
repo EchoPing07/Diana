@@ -328,12 +328,30 @@ type Reminder struct {
 	// SafeModeHeldTriggerAt 非零表示这条一次性提醒到点时被安全模式停发过，值是它当时的
 	// 原定时间。切回标准模式补发时按它注明原定时间、判断要不要过期作废；投递失败重试
 	// 改了 TriggerAt 也不影响它。只有真的被停发过的提醒才有这个标记。
-	SafeModeHeldTriggerAt   time.Time `json:"safe_mode_held_trigger_at,omitempty"`
+	SafeModeHeldTriggerAt time.Time `json:"safe_mode_held_trigger_at,omitempty"`
+	// OriginalTriggerAt 是一次性提醒第一次因为失败重试被挪走触发时间之前的原定时间：
+	// 重试会改 TriggerAt，判断「晚了多久」要看原定的那个。零值表示没被挪过，原定时间
+	// 就是 TriggerAt。用户改了提醒时间就清掉。
+	OriginalTriggerAt       time.Time `json:"original_trigger_at,omitempty"`
 	NotificationEnabled     bool      `json:"notification_enabled,omitempty"`
 	NotificationTargetsJSON string    `json:"notification_targets,omitempty"`
 	Message                 string    `json:"message"`
 	TriggerAt               time.Time `json:"trigger_at"`
 	IntervalSeconds         int64     `json:"interval_seconds,omitempty"`
+	// IntervalMonths 非零表示按日历月重复（每月、每年），下一次按月份加，不按秒数；
+	// 这时 IntervalSeconds 只是折算值，给「是不是周期任务」的判断和显示用。
+	IntervalMonths int `json:"interval_months,omitempty"`
+	// ScheduleWeekdays / ScheduleMonthDays / ScheduleWeekday+ScheduleWeekOrdinal 是
+	// 周期任务的日期规则（每周一三五、每月 1 号和 15 号、每月第一个周一），三选一，
+	// 见 scheduleDayRule。全为零值表示按起点排。
+	ScheduleWeekdays    []string `json:"schedule_weekdays,omitempty"`
+	ScheduleMonthDays   []int    `json:"schedule_month_days,omitempty"`
+	ScheduleWeekday     string   `json:"schedule_weekday,omitempty"`
+	ScheduleWeekOrdinal int      `json:"schedule_week_ordinal,omitempty"`
+	// ScheduleAnchorAt 是周期任务的时间网格原点：每次成功后下一次落在 anchor + k*interval
+	// 上，不跟着实际开跑时间或失败重试漂。「每周日 22:00」靠它一直停在 22:00。
+	// 零值是这个字段之前的旧记录，仍按实际开跑时间往后排。
+	ScheduleAnchorAt        time.Time `json:"schedule_anchor_at,omitempty"`
 	LastRunAt               time.Time `json:"last_run_at,omitempty"`
 	CancelledAt             time.Time `json:"cancelled_at,omitempty"`
 	LastError               string    `json:"last_error,omitempty"`

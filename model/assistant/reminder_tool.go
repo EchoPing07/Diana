@@ -14,7 +14,8 @@ import (
 )
 
 const (
-	maximumReminderDelay        = 365 * 24 * time.Hour
+	// maximumReminderDelay 是一年：delay 可以写 1y，闰年那一年有 366 天。
+	maximumReminderDelay        = 366 * 24 * time.Hour
 	maximumReminderMessageRunes = 2000
 	maximumTasksPerToolCall     = 5
 )
@@ -56,16 +57,18 @@ func (t *dianaReminderTool) Name() string {
 }
 
 func (t *dianaReminderTool) Description() string {
-	return `创建和管理持久化一次性提醒。用户要求在某个时间点或某段时间之后提醒时必须使用此工具；周期性查询、RSS/推特关注、GitHub 仓库更新这类会重复触发的订阅改用 subscription，用 kind 选种类。禁止用 run_command、sleep 或后台进程代替。初识及以上可用。`
+	return `创建和管理持久化一次性提醒。用户要求在某个时间点或某段时间之后提醒一次时必须使用此工具；「明天晚上十点」「28 号上午九点」传 date + time，系统按自然日换算；每天、每周这类重复提醒，以及周期性查询、RSS/推特关注、GitHub 仓库更新这类会重复触发的订阅改用 subscription，用 kind 选种类。禁止用 run_command、sleep 或后台进程代替。初识及以上可用。`
 }
 
 // InputSchema 声明参数契约。相对时间使用 delay，绝对时间使用 at，避免模型把
 // 按当前时间算出的延时再叠加到回补消息的原始时间上。
 func (t *dianaReminderTool) InputSchema() map[string]any {
 	item := map[string]any{
-		"delay":      toolStringParam("相对当前消息的等待时长，只接受 Go 时长写法：30s、5m、2h、36h（可组合成 1h30m）。仅用于‘过一段时间后’；与 at/trigger_at 二选一。最长 " + maximumReminderDelay.String() + "。"),
-		"at":         toolStringParam("绝对触发时间，使用 RFC3339（例如 2026-08-30T19:00:00+08:00）。用户指定‘今晚七点’、‘明天下午三点’等时间点时直接传目标时间，不要换算成 delay。与 delay 二选一。"),
+		"delay":      toolStringParam("相对当前消息的等待时长，单位 " + durationUnitsHint + "。例如 30s、5m、2h、3d、1w、1mo。仅用于‘过一段时间后’；与 at/trigger_at 二选一。最长 1y。"),
+		"at":         toolStringParam("绝对触发时间，使用 RFC3339（例如 2026-08-30T19:00:00+08:00）。用户说今天、明天、后天、几号、几点时优先改传 date + time，由系统换算日期；与 delay、date/time 三选一。"),
 		"trigger_at": toolStringParam("at 的兼容别名：绝对触发时间，使用 RFC3339。与 delay 二选一。"),
+		"date":       toolStringParam(taskDateDescription),
+		"time":       toolStringParam(taskTimeDescription),
 		"message":    toolStringParam("到点要发出的提醒内容，最多 " + itoa(maximumReminderMessageRunes) + " 个字符。"),
 	}
 	return toolObjectSchema([]string{"operation"}, map[string]any{
@@ -74,6 +77,8 @@ func (t *dianaReminderTool) InputSchema() map[string]any {
 		"delay":      item["delay"],
 		"at":         item["at"],
 		"trigger_at": item["trigger_at"],
+		"date":       item["date"],
+		"time":       item["time"],
 		"message":    item["message"],
 		"items": toolItemsParam("一次创建多个提醒；只在 create 时有效，最多 "+itoa(maximumTasksPerToolCall)+" 项。每项的 delay 与 at/trigger_at 二选一；剩余额度不足时按顺序创建到额度上限。",
 			maximumTasksPerToolCall, []string{"message"}, item),
@@ -98,6 +103,11 @@ func (t *dianaReminderTool) Run(ctx context.Context, input map[string]any) (stri
 	targetEvent := t.event
 	targetEvent.UserID = targetID
 	targetEvent.taskRequester = t.event.UserID
+	// 「明天」「26 号」按说话人的日历换算，时区看的是发起的人，不是被代建的目标用户。
+	input, dateNotes, err := applyTaskDateTime(input, t.runtime.taskClockForEvent(t.event), true)
+	if err != nil {
+		return "", err
+	}
 	operation := strings.ToLower(strings.TrimSpace(configToolString(input, "operation")))
 	switch operation {
 	case "create", "add":
@@ -119,6 +129,9 @@ func (t *dianaReminderTool) Run(ctx context.Context, input map[string]any) (stri
 			Message:  message,
 			Warnings: warnings,
 			Items:    make([]dianaReminder, 0, len(items)),
+		}
+		if len(dateNotes) > 0 {
+			result.Message += " " + strings.Join(dateNotes, " ")
 		}
 		if len(warnings) > 0 {
 			result.Message += " 警告：" + strings.Join(warnings, "；")
@@ -159,7 +172,7 @@ func (t *dianaReminderTool) Run(ctx context.Context, input map[string]any) (stri
 		return marshalDianaReminderResult(dianaReminderResult{
 			OK:       true,
 			Action:   "updated",
-			Message:  "一次性提醒已更新。",
+			Message:  strings.TrimSpace("一次性提醒已更新。 " + strings.Join(dateNotes, " ")),
 			Reminder: reminderForTool(item),
 		})
 	case "cancel":
@@ -291,14 +304,20 @@ func toolBatchItems(input map[string]any) ([]map[string]any, bool, error) {
 	return items, true, nil
 }
 
+// parseReminderDelay 把 delay 换算成从现在起的等待时长。月和年按日历从现在往后数：
+// 1 月 31 日说「一个月后」是 2 月的最后一天。
 func parseReminderDelay(raw string) (time.Duration, error) {
-	raw = strings.TrimSpace(strings.ToLower(raw))
-	delay, err := time.ParseDuration(raw)
-	if err != nil || delay <= 0 {
-		return 0, fmt.Errorf("提醒时长格式不正确，请使用 30s、1m、2h 这类格式")
+	parsed, err := parseDurationUnits(raw)
+	if err != nil {
+		return 0, fmt.Errorf("提醒时长格式不正确：%w", err)
+	}
+	now := time.Now()
+	delay := parsed.AddTo(now).Sub(now)
+	if delay <= 0 {
+		return 0, fmt.Errorf("提醒时长必须大于 0")
 	}
 	if delay > maximumReminderDelay {
-		return 0, fmt.Errorf("提醒时长不能超过 %s", maximumReminderDelay)
+		return 0, fmt.Errorf("提醒时长不能超过 1y")
 	}
 	return delay, nil
 }
@@ -510,8 +529,9 @@ func (r *Runtime) updateOneTimeReminder(ownerID string, id string, input map[str
 			item.TriggerAt = triggerAt
 		}
 		if rawDelay != "" || rawAt != "" {
-			// 改了时间就是新约的时间，之前被停发时记下的原定时间不再算数。
+			// 改了时间就是新约的时间，之前被停发或重试时记下的原定时间不再算数。
 			item.SafeModeHeldTriggerAt = time.Time{}
+			item.OriginalTriggerAt = time.Time{}
 		}
 		if message != "" {
 			item.Message = message
