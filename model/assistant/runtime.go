@@ -4627,7 +4627,7 @@ func (r *Runtime) replyTo(ctx context.Context, event MessageEvent, text string) 
 			r.notePrivateClosingSilence(event, cfg, time.Now())
 			// 不说话、只回一张表情包：静默收尾时填了 sticker。挑不到、到了上限或者被叫停
 			// 都不补文字，这一轮就是安静的。
-			if query := finalizeSticker.take(); query != "" && r.groupStopDropsReply(event, proactiveTriggered, time.Now()) == nil {
+			if query, _ := finalizeSticker.take(); query != "" && r.groupStopDropsReply(event, proactiveTriggered, time.Now()) == nil {
 				_ = r.withReplySuppressionOutboundGate(ctx, event, func(sendCtx context.Context) error {
 					r.sendFinalizeSticker(sendCtx, event, query)
 					return nil
@@ -4773,6 +4773,13 @@ func (r *Runtime) replyTo(ctx context.Context, event MessageEvent, text string) 
 	}
 	var sentMessageIDs []string
 	err = r.withReplySuppressionOutboundGate(sendBaseCtx, event, func(sendCtx context.Context) error {
+		// 表情包和文字谁先发由模型按真人习惯选（sticker_order）：第一反应先甩图，收尾点题后甩图。
+		stickerAllowed := !controlIntent.RefuseCurrent && !controlIntent.SuppressCurrentUser
+		stickerQuery, stickerFirst := finalizeSticker.take()
+		if stickerAllowed && stickerFirst {
+			r.sendFinalizeSticker(sendCtx, event, stickerQuery)
+			stickerQuery = ""
+		}
 		var sendErr error
 		sentMessageIDs, sendErr = r.sendGeneratedReplyWithMessageIDs(sendCtx, event, reply)
 		if sendErr != nil {
@@ -4781,9 +4788,9 @@ func (r *Runtime) replyTo(ctx context.Context, event MessageEvent, text string) 
 		r.applyReplyControlAfterSend(sendCtx, event, reply, controlIntent)
 		// 只同步真正发出去的这一版：审核改写、拦下或发送失败的都到不了这里。
 		r.afterReplyVRChat(event, strings.Join(splitEventChatReply(reply, cfg, event), "\n"))
-		if !controlIntent.RefuseCurrent && !controlIntent.SuppressCurrentUser {
+		if stickerAllowed {
 			r.sendFinalizeRender(sendCtx, event, finalizeRender.take())
-			r.sendFinalizeSticker(sendCtx, event, finalizeSticker.take())
+			r.sendFinalizeSticker(sendCtx, event, stickerQuery)
 		}
 		return nil
 	})
@@ -4916,7 +4923,7 @@ func (r *Runtime) generateReply(ctx context.Context, cfg BotConfig, event Messag
 		// 得知道这一轮到底注册了哪些工具、哪条 MCP 和插件各带了哪几个。
 		agentCfg.CoreTools = r.agentCoreTools(event, registry)
 		if _, ok := registry.Get(dianaStickerToolName); ok {
-			agentCfg.FinalizeFields = append(agentCfg.FinalizeFields, stickerFinalizeField())
+			agentCfg.FinalizeFields = append(agentCfg.FinalizeFields, stickerFinalizeField(), stickerOrderField())
 		}
 		if r.offersRenderFinalizeField(event, registry) {
 			agentCfg.FinalizeFields = append(agentCfg.FinalizeFields, renderFinalizeField())
@@ -4964,7 +4971,7 @@ func (r *Runtime) generateReply(ctx context.Context, cfg BotConfig, event Messag
 		r.rememberAgentRunProgress(event, resp)
 		r.rememberClaimSources(event, resp.Claims)
 		r.rememberToolCalls(event, resp.Steps)
-		finalizeStickerFromContext(ctx).set(resp.FinalizeFields[stickerFinalizeFieldName])
+		finalizeStickerFromContext(ctx).set(resp.FinalizeFields[stickerFinalizeFieldName], resp.FinalizeFields[stickerOrderFieldName])
 		if resp.Silent {
 			// 模型在 agent_finalize 上自己按下了静默。没有正文可整理，也不该被
 			// 下游任何一条兜底文案补上；调用方按「本轮不发送」处理。
