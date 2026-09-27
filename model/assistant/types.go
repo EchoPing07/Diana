@@ -700,6 +700,9 @@ type BotConfig struct {
 	RecallReplyAutoDeleteEnabled *bool `json:"recall_reply_auto_delete_enabled,omitempty"`
 	RecallReplyTTLSeconds        int   `json:"recall_reply_auto_delete_delay_seconds,omitempty"`
 	LLMIdentityMaskingEnabled    *bool `json:"llm_identity_masking_enabled,omitempty"`
+	// LLMIdentityBodyAccounts 让隐私代理连正文里直接写的账号数字一起换成别名：只换
+	// 核实过是本群成员的号，其余数字原样保留。隐私代理关掉时它不起作用。
+	LLMIdentityBodyAccounts *bool `json:"llm_identity_body_account_mapping_enabled,omitempty"`
 	// ModelCallQuota 是这台机器人的每群额度默认值：滚动 5 小时窗口内，单个群能
 	// 发起的模型调用次数。群配置里填了就以群为准，留空跟随这里；两边都是 0 表示不限。
 	//
@@ -1162,6 +1165,7 @@ type ConfigPayload struct {
 	RecallReplyAutoDeleteEnabled *bool `json:"recall_reply_auto_delete_enabled,omitempty"`
 	RecallReplyTTLSeconds        int   `json:"recall_reply_auto_delete_delay_seconds,omitempty"`
 	LLMIdentityMaskingEnabled    *bool `json:"llm_identity_masking_enabled,omitempty"`
+	LLMIdentityBodyAccounts      *bool `json:"llm_identity_body_account_mapping_enabled,omitempty"`
 	// MaxContextTokens 限定这个机器人单次请求最多用掉多少上下文 token。
 	// 0 表示不额外限制，跟随提供商配置档的窗口。它只能收紧不能放宽：配置档说
 	// 模型只有 32K，这里填 200K 也不会真的发出 200K 的请求。
@@ -1757,6 +1761,7 @@ func DefaultBotConfig() BotConfig {
 		RecallReplyAutoDeleteEnabled:   boolPointer(false),
 		RecallReplyTTLSeconds:          defaultRecallReplyTTLSeconds,
 		LLMIdentityMaskingEnabled:      boolPointer(true),
+		LLMIdentityBodyAccounts:        boolPointer(true),
 		BotReplyLoopDetectionEnabled:   boolPointer(true),
 		ReplyRefusalSuppressionEnabled: boolPointer(true),
 		ReplySafetyMasterEnabled:       boolPointer(true),
@@ -1966,6 +1971,9 @@ func (cfg BotConfig) WithDefaults() BotConfig {
 	}
 	if cfg.LLMIdentityMaskingEnabled == nil {
 		cfg.LLMIdentityMaskingEnabled = boolPointer(true)
+	}
+	if cfg.LLMIdentityBodyAccounts == nil {
+		cfg.LLMIdentityBodyAccounts = boolPointer(true)
 	}
 	if cfg.ReplySafetyMasterEnabled == nil {
 		cfg.ReplySafetyMasterEnabled = boolPointer(true)
@@ -2355,6 +2363,7 @@ func PayloadFromConfig(cfg BotConfig) ConfigPayload {
 		RecallReplyAutoDeleteEnabled:      copyBoolPointer(cfg.RecallReplyAutoDeleteEnabled),
 		RecallReplyTTLSeconds:             cfg.RecallReplyTTLSeconds,
 		LLMIdentityMaskingEnabled:         copyBoolPointer(cfg.LLMIdentityMaskingEnabled),
+		LLMIdentityBodyAccounts:           copyBoolPointer(cfg.LLMIdentityBodyAccounts),
 		MaxContextTokens:                  cfg.MaxContextTokens,
 		RecentHistoryTokenBudget:          cfg.RecentHistoryTokenBudget,
 		RecentContextLimit:                cfg.RecentContextLimit,
@@ -2563,6 +2572,7 @@ func ConfigFromPayload(payload ConfigPayload, existing BotConfig) BotConfig {
 		RecallReplyAutoDeleteEnabled:    copyBoolPointer(payload.RecallReplyAutoDeleteEnabled),
 		RecallReplyTTLSeconds:           payload.RecallReplyTTLSeconds,
 		LLMIdentityMaskingEnabled:       copyBoolPointer(payload.LLMIdentityMaskingEnabled),
+		LLMIdentityBodyAccounts:         copyBoolPointer(payload.LLMIdentityBodyAccounts),
 		MaxContextTokens:                payload.MaxContextTokens,
 		RecentHistoryTokenBudget:        payload.RecentHistoryTokenBudget,
 		RecentContextLimit:              payload.RecentContextLimit,
