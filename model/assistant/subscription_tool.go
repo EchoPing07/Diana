@@ -93,7 +93,8 @@ func (t *dianaSubscriptionTool) Description() string {
 		`管理持久化订阅：` + strings.Join(labels, "；") + `。` +
 		`先用 kind 选订阅种类，再用 operation 选动作；每个字段的说明里写了它属于哪个 kind，不属于当前 kind 的字段不要填。` +
 		`operation=list 不填 kind 就一次列出全部种类，每条带 kind 字段——用户问「我有哪些订阅」时这样调，不要逐个 kind 试。` +
-		`cancel 只停止并保留记录，delete 才彻底删除。只执行一次的提醒不在本工具，改用 reminder。`
+		`cancel 只停止并保留记录，delete 才彻底删除。只执行一次的提醒不在本工具，改用 reminder；` +
+		`「每天八点」「每周日 22:00」这类重复的提醒属于 kind=schedule，用 at 定首次时间、interval 定间隔。`
 }
 
 func (t *dianaSubscriptionTool) InputSchema() map[string]any {
@@ -115,8 +116,9 @@ func (t *dianaSubscriptionTool) InputSchema() map[string]any {
 		"operation": toolEnumParam("要执行的操作。cancel 只停止并保留记录，delete 才彻底删除；run 是立刻检查一次，只有 kind=github 支持。",
 			ordered...),
 		"id": toolStringParam("要操作的订阅 ID；update、cancel、delete、run 必填，可先用 list 查到。"),
-		"interval": toolStringParam("检查间隔，只接受 Go 时长写法：30s、15m、1h30m。各 kind 的上下限不同，填错会返回具体数值。" +
-			"kind=schedule 省略会被拒绝，kind=rss 省略按默认间隔处理。"),
+		"interval": toolStringParam("重复间隔，单位 " + durationUnitsHint + "。" +
+			"kind=schedule 必填：每天 1d、每周 1w、每月 1mo、每年 1y，固定时间点另用 at 指定；kind=rss 是检查 Feed 的间隔，例如 15m，省略按默认间隔处理。" +
+			"各 kind 的上下限不同，填错会返回具体数值。"),
 	}
 	for key, value := range subscriptionKindFields() {
 		schema[key] = value
@@ -128,11 +130,25 @@ func (t *dianaSubscriptionTool) InputSchema() map[string]any {
 // 合并之后模型同时看得见三套字段，不标清楚归属就会串。
 func subscriptionKindFields() map[string]any {
 	return map[string]any{
-		"query": toolStringParam("kind=schedule 专用：每次触发时要执行的查询要求，写成一句完整的自然语言指令。"),
+		"query":      toolStringParam("kind=schedule 专用：" + scheduleQueryDescription),
+		"at":         toolStringParam("kind=schedule 专用：" + scheduleAtDescription),
+		"weekdays":   toolEnumArrayParam("kind=schedule 专用："+scheduleWeekdaysDescription, scheduleWeekdayOrder...),
+		"date":       toolStringParam("kind=schedule 专用：首次触发的日期，可代替 at。" + taskDateDescription),
+		"time":       toolStringParam("kind=schedule 专用：每次触发的时刻，可代替 at；每天 8 点只传 time=08:00 即可。" + taskTimeDescription),
+		"month_days": toolIntArrayParam("kind=schedule 专用："+scheduleMonthDaysDescription, -31, 31),
+		"weekday":    toolEnumParam("kind=schedule 专用："+scheduleWeekdayDescription, scheduleWeekdayOrder...),
+		"week":       toolIntParam("kind=schedule 专用："+scheduleWeekDescription, -5, 5),
 		"items": toolItemsParam("kind=schedule 专用：一次创建多个订阅，只在 create 时有效，最多 "+itoa(maximumTasksPerToolCall)+" 项。",
 			maximumTasksPerToolCall, []string{"interval", "query"}, map[string]any{
-				"interval": toolStringParam("重复间隔，Go 时长写法。"),
-				"query":    toolStringParam("每次触发时要执行的查询要求。"),
+				"interval":   toolStringParam("重复间隔：每天 1d、每周 1w、每月 1mo、每年 1y；m 是分钟，月写 mo。"),
+				"query":      toolStringParam("每次触发时要查的内容，或到点要提醒的内容。"),
+				"at":         toolStringParam("首次触发时间，RFC3339；有固定时间点时必须传。"),
+				"date":       toolStringParam("首次触发日期，可代替 at：today、tomorrow、day_after_tomorrow、2026-09-28、28。"),
+				"time":       toolStringParam("触发时刻 HH:MM，可代替 at。"),
+				"weekdays":   toolEnumArrayParam("按周重复时每周的哪几天，例如 [\"mon\",\"wed\",\"fri\"]；interval 用 1w。", scheduleWeekdayOrder...),
+				"month_days": toolIntArrayParam("按月重复时每月的哪几号，例如 [1,15]，-1 是最后一天。", -31, 31),
+				"weekday":    toolEnumParam("按月重复时配合 week 表示第几个星期几。", scheduleWeekdayOrder...),
+				"week":       toolIntParam("配合 weekday：1~5 从月初数，-1 是最后一个。", -5, 5),
 			}),
 		"target_user_id":  toolStringParam("kind=schedule 专用：代其他用户管理时的目标账号，仅机器人主人可用；创建仍占目标用户的额度。"),
 		"twitter_handle":  toolStringParam("kind=rss 专用：要关注的单个 X (Twitter) 用户名，不带 @。盯多个人用 twitter_handles。"),
