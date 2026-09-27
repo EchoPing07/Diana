@@ -4508,10 +4508,11 @@ func (r *Runtime) replyTo(ctx context.Context, event MessageEvent, text string) 
 	// 该处理哪一张。媒体按 segmentMediaTurnKey 去重，来源消息号照样标在段上。
 	messageEvent := attachInboundTurnMedia(event, directReplySupplementEvents(append(r.directReplySupplements(ctx), backlogReplyTurnFromContext(ctx)...)))
 	currentText := currentPromptTextWithSemanticContext(event, cleanText, semanticContext, promptAnnotation{
-		BotID:        firstNonEmpty(strings.TrimSpace(event.SelfID), strings.TrimSpace(cfg.BotAccount)),
-		WakeGuidance: cfg.prompt(promptWakeOnlySpec),
-		TriggerWords: cfg.GroupTriggers,
-		Overrides:    cfg.PromptOverrides,
+		BotID:           firstNonEmpty(strings.TrimSpace(event.SelfID), strings.TrimSpace(cfg.BotAccount)),
+		WakeGuidance:    cfg.prompt(promptWakeOnlySpec),
+		TriggerWords:    cfg.GroupTriggers,
+		Overrides:       cfg.PromptOverrides,
+		SenderGroupRole: r.promptSenderGroupRole(ctx, event),
 	})
 	currentText = updatedReplyRequestText(currentText, r.pendingReplyRequestContexts(r.directReplySupplements(ctx), event))
 	currentText = backlogReplyRequestText(currentText, event, backlogReplyTurnFromContext(ctx))
@@ -5045,6 +5046,11 @@ func (p *runtimeAgentLLMProvider) Generate(ctx context.Context, req llm.Generate
 // 它自己的描述里，目录行压到 120 字就没了，挪出去等于这个工具不会再被用；它只在 OneBot
 // 会话里注册。
 //
+// platform 常驻，理由和 poke 一样不在使用率（近 7 天 2790 次运行里只有 18 次用到）：
+// 按需加载时，模型碰到禁言、群公告这类请求常常不去加载，直接凭印象说「我不是管理员」
+// 「平台没这功能」就拒了。09-27 群主要求全员禁言，四轮里两轮没加载就拒绝。它的 schema
+// 按发言人身份多一组群管操作，群主、管理员说话那一轮的前缀缓存会和普通成员分开。
+//
 // say（中途说一句）常驻：它的用处就是在动手前先开口，按需加载就得先多走一步
 // tools_load，「先说一句」反而慢了半拍；描述很短，每轮多带的开销可以忽略。
 //
@@ -5059,6 +5065,7 @@ var replyAgentCoreTools = []string{
 	"browser_render",
 	"capabilities",
 	dianaPokeToolName,
+	dianaPlatformToolName,
 }
 
 type replyRuleDecision struct {
@@ -6784,6 +6791,8 @@ type promptAnnotation struct {
 	TriggerWords []string
 	// Overrides 是机器人的提示词覆盖，注解里的各句说明从这里取；零值用内置默认值。
 	Overrides PromptOverrides
+	// SenderGroupRole 是当前发言者的群身份，群主和管理员会标在发言者后面。
+	SenderGroupRole GroupRole
 }
 
 func (a promptAnnotation) botID(event MessageEvent) string {
