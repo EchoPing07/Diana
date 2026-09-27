@@ -6,6 +6,8 @@ package assistant
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -470,44 +472,71 @@ func TestRankStickerCandidatesMatchesAnyKeywordAndPrefersTags(t *testing.T) {
 	}
 }
 
-// 机器人刚在本会话发过的，同样命中也排到后面；过了窗口就恢复。
-func TestRankStickerCandidatesPushesRecentlySentDown(t *testing.T) {
-	now := int64(100000)
-	fresh := func() []stickerCandidate {
+// 发过的表情包降低再被选中的欲望（思路照 vector_meme）：本会话最近 10 次发过的大幅降权，
+// 被更新的发送挤出窗口后恢复；10 分钟内刚发的再降一截；累计发得多的持续小幅降权。
+func TestRankStickerCandidatesPenalizesRepeats(t *testing.T) {
+	now := int64(1_000_000)
+	base := func() []stickerCandidate {
 		return []stickerCandidate{
-			{ID: "just-sent", Summary: "无语", EventTime: 20, LastSentAt: now - 60},
-			{ID: "other", Summary: "无语", EventTime: 10},
+			{ID: "sent", Summary: "无语", EventTime: 20, LastSentAt: now - 3600},
+			{ID: "fresh", Summary: "无语", EventTime: 10},
 		}
 	}
-	candidates := fresh()
+	candidates := base()
 	rankStickerCandidates(candidates, "无语", now)
-	if candidates[0].ID != "other" || candidates[1].Score <= 0 {
-		t.Fatalf("recent ranking = %#v", candidates)
+	if candidates[0].ID != "fresh" || !candidates[1].RecentlySent || candidates[1].Score >= candidates[0].Score*0.4 {
+		t.Fatalf("recent window: %v", stickerCandidateScores(candidates))
 	}
-	candidates = fresh()
-	rankStickerCandidates(candidates, "无语", now+int64(stickerRecentSendWindow/time.Second)+60)
-	if candidates[0].ID != "just-sent" {
-		t.Fatalf("after window ranking = %#v", candidates)
+
+	// 之后又发了 10 张别的，它被挤出最近窗口，只剩累计次数的轻微降权。
+	candidates = base()
+	for index := 0; index < stickerRecentSendCount; index++ {
+		candidates = append(candidates, stickerCandidate{ID: fmt.Sprintf("other-%d", index), Summary: "别的", LastSentAt: now - int64(60*(index+1))})
+	}
+	candidates[0].SentCount = 1
+	rankStickerCandidates(candidates, "无语", now)
+	if candidates[0].ID != "fresh" || candidates[1].ID != "sent" || candidates[1].RecentlySent {
+		t.Fatalf("after window: %v", stickerCandidateScores(candidates))
+	}
+	if ratio := candidates[1].Score / candidates[0].Score; ratio < 0.94 || ratio > 0.96 {
+		t.Fatalf("one past send should cost ~5%%, ratio=%.3f", ratio)
+	}
+
+	// 累计发了很多次：降权到底是 70%。
+	if got := stickerRepeatFactor(stickerCandidate{SentCount: 20}, now); got != stickerUsagePenaltyFloor {
+		t.Fatalf("usage floor = %v", got)
+	}
+	// 10 分钟内刚发过：最近发过 0.35 × 刚发过 0.5。
+	if got := stickerRepeatFactor(stickerCandidate{RecentlySent: true, LastSentAt: now - 60}, now); math.Abs(got-stickerRecentSendFactor*stickerJustSentFactor) > 1e-9 {
+		t.Fatalf("just sent factor = %v", got)
 	}
 }
 
-// 命中的排在前面；不够时用没命中的随机补位，刚发过的最后才补。
-func TestSelectStickerCandidatesFillsRandomlyAndSkipsRecentlySent(t *testing.T) {
-	now := int64(100000)
+// 命中的排在前面；不够时随机补位，没发过的先补，发过的其次，最近发过的最后。
+func TestSelectStickerCandidatesFillsUnusedBeforeUsed(t *testing.T) {
 	candidates := []stickerCandidate{
 		{ID: "hit", Score: 10},
-		{ID: "recent", LastSentAt: now - 60},
-		{ID: "a"}, {ID: "b"}, {ID: "c"},
+		{ID: "recent", RecentlySent: true, LastSentAt: 90},
+		{ID: "used", SentCount: 3, LastSentAt: 10},
+		{ID: "a"}, {ID: "b"},
 	}
 	first := func(int) int { return 0 }
-	picked, matched := selectStickerCandidates(candidates, 3, now, first)
-	if matched != 1 || len(picked) != 3 || picked[0].ID != "hit" || picked[1].ID != "a" || picked[2].ID != "b" {
-		t.Fatalf("picked = %#v matched=%d", picked, matched)
+	picked, matched := selectStickerCandidates(candidates, 4, 100, first)
+	if matched != 1 || strings.Join(stickerCandidateIDs(picked), ",") != "hit,a,b,used" {
+		t.Fatalf("picked = %v matched=%d", stickerCandidateIDs(picked), matched)
 	}
-	picked, _ = selectStickerCandidates(candidates, 5, now, first)
-	if len(picked) != 5 || picked[4].ID != "recent" {
-		t.Fatalf("picked = %#v", picked)
+	picked, _ = selectStickerCandidates(candidates, 5, 100, first)
+	if picked[4].ID != "recent" {
+		t.Fatalf("picked = %v", stickerCandidateIDs(picked))
 	}
+}
+
+func stickerCandidateScores(candidates []stickerCandidate) []string {
+	out := make([]string, len(candidates))
+	for index, candidate := range candidates {
+		out[index] = fmt.Sprintf("%s=%.2f", candidate.ID, candidate.Score)
+	}
+	return out
 }
 
 // 命中太多时在前几名里加权抽，不是永远同一批；分数最高的仍然排在返回列表前面。
