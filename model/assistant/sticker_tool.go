@@ -26,9 +26,15 @@ const (
 	dianaStickerToolName             = "sticker"
 	maximumStickerDescriptionLookups = 128
 	stickerDescriptionWorkers        = 3
-	// 刚发过的表情包在这段时间内往后排，随机补位时也先跳过。
-	stickerRecentSendWindow = 12 * time.Hour
-	stickerRecentSendFactor = 0.3
+	// 发过的表情包降低再被选中的「欲望」，思路照 vector_meme（core/retriever.py）：
+	// 最近发过的大幅降权，刚发过的再降一截，发得多的持续小幅降权。它在 0～1 的相似度上
+	// 做减法，这里的关键词得分没有上限，改成乘法。
+	stickerRecentSendCount   = 10   // 本会话最近这么多次发过的算「最近发过」（它用 20，Diana 各会话发得少、小群库存才十几张）
+	stickerRecentSendFactor  = 0.35 // 最近发过（含和它算同一张的）
+	stickerJustSentSeconds   = 600
+	stickerJustSentFactor    = 0.5  // 10 分钟内刚发过，再乘一次
+	stickerUsagePenaltyStep  = 0.05 // 本会话每发过一次降 5%
+	stickerUsagePenaltyFloor = 0.7  // 最多降到 70%
 	// 命中的候选先取「返回数量 × 这个倍数」进池子，再按分数加权抽，排名靠前的更容易被抽中。
 	stickerMatchedPoolFactor = 2
 	stickerBackgroundTagTTL  = 3 * time.Minute
@@ -74,6 +80,7 @@ type stickerCandidate struct {
 	MessageID   string
 	EventTime   int64
 	LastSentAt  int64
+	SentCount   int
 	// RecentlySent 是这张或和它算同一张的图刚在本会话发过，见 rankStickerCandidates。
 	RecentlySent  bool
 	Score         float64
@@ -483,7 +490,7 @@ func stickerCandidatesFromAssets(assets []StickerAsset, currentSession string, i
 		candidates = append(candidates, stickerCandidate{
 			ID: hash[:24], Summary: summary, Path: path, Hash: hash, MessageID: asset.MessageID, EventTime: asset.EventTime,
 			Description: strings.TrimSpace(firstNonEmpty(asset.Gist, asset.Description)),
-			Tags:        asset.Tags, Tagged: asset.Tagged, FromAssets: true, LastSentAt: asset.LastSentAt,
+			Tags:        asset.Tags, Tagged: asset.Tagged, FromAssets: true, LastSentAt: asset.LastSentAt, SentCount: asset.SentCount,
 			SemanticScore: semanticScores[stickerCandidateEventKey(source)], SourceEvent: source,
 			SharedGroup:   asset.Kind == EventKindGroup && asset.Session != currentSession,
 			SharedPrivate: asset.Kind == EventKindPrivate && asset.Session != currentSession,
@@ -590,7 +597,7 @@ func rankStickerCandidates(candidates []stickerCandidate, query string, now int6
 	for index, term := range terms {
 		idf[index] = math.Log(1 + float64(len(candidates))/float64(1+documentFrequency(term.text)))
 	}
-	markRecentlySentStickers(candidates, now)
+	markRecentlySentStickers(candidates)
 	wholeQuery := strings.ToLower(strings.TrimSpace(query))
 	for index := range candidates {
 		score := float64(candidates[index].SemanticScore)
@@ -605,10 +612,7 @@ func rankStickerCandidates(candidates []stickerCandidate, query string, now int6
 		if wholeQuery != "" && strings.ToLower(candidates[index].Summary) == wholeQuery {
 			score += 50
 		}
-		if candidates[index].RecentlySent {
-			score *= stickerRecentSendFactor
-		}
-		candidates[index].Score = score
+		candidates[index].Score = score * stickerRepeatFactor(candidates[index], now)
 	}
 	sort.SliceStable(candidates, func(i, j int) bool {
 		if candidates[i].Score != candidates[j].Score {
@@ -618,17 +622,26 @@ func rankStickerCandidates(candidates []stickerCandidate, query string, now int6
 	})
 }
 
-// markRecentlySentStickers 标出刚发过的，以及和刚发过的算同一张（转存副本、同模板换字）的候选。
-func markRecentlySentStickers(candidates []stickerCandidate, now int64) {
+// markRecentlySentStickers 标出本会话最近 stickerRecentSendCount 次发过的，以及和它们
+// 算同一张（转存副本、同模板换字）的候选。
+func markRecentlySentStickers(candidates []stickerCandidate) {
+	var sentTimes []int64
+	for _, candidate := range candidates {
+		if candidate.LastSentAt > 0 {
+			sentTimes = append(sentTimes, candidate.LastSentAt)
+		}
+	}
+	if len(sentTimes) == 0 {
+		return
+	}
+	sort.Slice(sentTimes, func(i, j int) bool { return sentTimes[i] > sentTimes[j] })
+	cutoff := sentTimes[min(len(sentTimes), stickerRecentSendCount)-1]
 	var sent []stickerSignature
 	for index := range candidates {
-		candidates[index].RecentlySent = stickerSentRecently(candidates[index], now)
+		candidates[index].RecentlySent = candidates[index].LastSentAt > 0 && candidates[index].LastSentAt >= cutoff
 		if candidates[index].RecentlySent {
 			sent = append(sent, newStickerSignature(candidates[index]))
 		}
-	}
-	if len(sent) == 0 {
-		return
 	}
 	for index := range candidates {
 		if candidates[index].RecentlySent {
@@ -644,26 +657,40 @@ func markRecentlySentStickers(candidates []stickerCandidate, now int64) {
 	}
 }
 
-func stickerSentRecently(candidate stickerCandidate, now int64) bool {
-	return candidate.LastSentAt > 0 && now-candidate.LastSentAt < int64(stickerRecentSendWindow/time.Second)
+// stickerRepeatFactor 是发过的表情包的降权系数，见 stickerRecentSendCount 那组常量。
+func stickerRepeatFactor(candidate stickerCandidate, now int64) float64 {
+	factor := 1.0
+	if candidate.RecentlySent {
+		factor *= stickerRecentSendFactor
+	}
+	if candidate.LastSentAt > 0 && now-candidate.LastSentAt < stickerJustSentSeconds {
+		factor *= stickerJustSentFactor
+	}
+	if candidate.SentCount > 0 {
+		factor *= math.Max(1-stickerUsagePenaltyStep*float64(candidate.SentCount), stickerUsagePenaltyFloor)
+	}
+	return factor
 }
 
 // selectStickerCandidates 从已排序的候选里挑出最多 limit 个交给 Agent，返回其中命中关键词的个数。
 // 命中的在前几名里按分数平方加权抽，免得每次都是同一批；不够的用没命中的随机补位，
-// 刚发过的最后才补。randomIndex(n) 返回 [0,n) 的随机数，测试可以替换。
+// 没发过的先补，最近发过的最后才补。randomIndex(n) 返回 [0,n) 的随机数，测试可以替换。
 func selectStickerCandidates(candidates []stickerCandidate, limit int, now int64, randomIndex func(int) int) ([]stickerCandidate, int) {
 	if limit <= 0 || len(candidates) == 0 {
 		return nil, 0
 	}
-	var matched, fresh, recent []stickerCandidate
+	// 随机补位的顺序：没发过的、发过但不是最近的、最近发过的。
+	var matched, unused, used, recent []stickerCandidate
 	for _, candidate := range candidates {
 		switch {
 		case candidate.Score > 0:
 			matched = append(matched, candidate)
-		case candidate.RecentlySent || stickerSentRecently(candidate, now):
+		case candidate.RecentlySent:
 			recent = append(recent, candidate)
+		case candidate.SentCount > 0 || candidate.LastSentAt > 0:
+			used = append(used, candidate)
 		default:
-			fresh = append(fresh, candidate)
+			unused = append(unused, candidate)
 		}
 	}
 	pool := matched
@@ -697,7 +724,7 @@ func selectStickerCandidates(candidates []stickerCandidate, limit int, now int64
 		sort.SliceStable(picked, func(i, j int) bool { return picked[i].Score > picked[j].Score })
 	}
 	matchedCount := len(picked)
-	for _, rest := range [][]stickerCandidate{fresh, recent} {
+	for _, rest := range [][]stickerCandidate{unused, used, recent} {
 		rest = append([]stickerCandidate(nil), rest...)
 		for len(picked) < limit && len(rest) > 0 {
 			index := randomIndex(len(rest))
