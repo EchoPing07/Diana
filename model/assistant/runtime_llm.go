@@ -1239,6 +1239,7 @@ func (r *Runtime) systemPromptPartsWithRelationshipAndAgentTools(event MessageEv
 	// 离生成越近越管用。
 	appendPromptSection(&tail, r.persistentVoicePrompt(event, cfg))
 	appendPromptSection(&tail, r.groupStylePrompt(event, cfg))
+	appendPromptSection(&tail, r.groupRulesPrompt(event, cfg))
 	appendPromptSection(&tail, r.groupLengthNormPrompt(event, cfg))
 	appendPromptSection(&tail, r.moodToneForConfig(cfg, event.ProfileID))
 	// 语气锚点必须留在最后：前面的工具规则、权限说明和拒答流程都是公文体，离生成
