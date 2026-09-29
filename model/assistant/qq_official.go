@@ -5,10 +5,12 @@ package assistant
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -675,6 +677,9 @@ func (p qqGatewayPayload) MarshalJSON() ([]byte, error) {
 type qqOfficialMessage struct {
 	ID      string `json:"id"`
 	Content string `json:"content"`
+	// Attachments 携带图片、语音、文件等富媒体，content 里只有文字；不解析它们，
+	// 群友发的图就整个进不到上下文。
+	Attachments []qqOfficialAttachment `json:"attachments"`
 	// GroupOpenID 只在群消息里出现，是这个群对本机器人的稳定标识。
 	GroupOpenID string `json:"group_openid"`
 	// GroupID 是全量群消息（GROUP_MESSAGE_CREATE）里携带的群标识，与 group_openid 同值，取不到后者时兜底。
@@ -758,6 +763,96 @@ func stripQQBotMentionTokens(text string, mentions []qqOfficialMention, selfID s
 	return strings.TrimSpace(text)
 }
 
+// qqOfficialAttachment 是消息附带的一条富媒体附件。官方只给元信息和下载地址，
+// 图片、语音、视频、文件都靠 content_type 区分。
+type qqOfficialAttachment struct {
+	ContentType string `json:"content_type"`
+	Filename    string `json:"filename"`
+	URL         string `json:"url"`
+}
+
+var (
+	// qqFaceTagPattern 匹配 content 里的表情标签，实到过两种形态：表情商城的
+	// <faceType=4,faceId="",ext="…">，以及系统表情的 <faceType=6,faceId="0",ext="…">。
+	qqFaceTagPattern = regexp.MustCompile(`<faceType=\d+[^>]*>`)
+	// qqFaceExtPattern 从单个表情标签里抠出 base64 的 ext 字段。
+	qqFaceExtPattern = regexp.MustCompile(`ext="([^"]*)"`)
+)
+
+// qqOfficialFaceText 把 content 里的表情标签翻成可读文本。
+//
+// 名字只藏在标签的 ext 里：base64 解开是 JSON，text 字段就是表情名，名字自带方括号
+// （如 [吃芒果]）。原样透传会把一串协议码带进模型上下文，翻成 [表情:[吃芒果]] 模型
+// 才分得清表情和正文里写的字。名字取不到时（ext 里的 text 为空，或标签里根本没有
+// ext）退回 [表情]，至少让模型知道这里有个表情。
+//
+// 表情图不在这里：官方对表情商城这类只给名字、不给图，自家表情则是空名标签配一张
+// 附件图，图案由 qqOfficialImageSegments 单独拆成图片段，这个占位不代替它。
+func qqOfficialFaceText(content string) string {
+	if !strings.Contains(content, "<faceType") {
+		return content
+	}
+	return qqFaceTagPattern.ReplaceAllStringFunc(content, func(tag string) string {
+		if name := qqOfficialFaceTagName(tag); name != "" {
+			return "[表情:" + name + "]"
+		}
+		return "[表情]"
+	})
+}
+
+// qqOfficialFaceTagName 解出表情标签里的名字，取不到返回空串。
+func qqOfficialFaceTagName(tag string) string {
+	match := qqFaceExtPattern.FindStringSubmatch(tag)
+	if match == nil {
+		return ""
+	}
+	decoded, err := base64.StdEncoding.DecodeString(match[1])
+	if err != nil {
+		return ""
+	}
+	var payload struct {
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(decoded, &payload) != nil {
+		return ""
+	}
+	return strings.TrimSpace(payload.Text)
+}
+
+// qqOfficialImageSegments 把图片附件拆成图片段，紧跟正文段之后。官方事件的富媒体
+// 全在 attachments 里、content 只剩文字，不拆出来群友发的图就整个丢了；拆出来后
+// 和 markdown 拆图一样走现有的识图与图片描述流程。
+//
+// 自家表情也走这里：content 是空名的 <faceType=…> 标签（正文只剩 [表情] 占位），
+// 图案本体就是这个附件，所以入站不会被当成纯文字消息。
+func qqOfficialImageSegments(attachments []qqOfficialAttachment) []MessageSegment {
+	var segments []MessageSegment
+	for _, attachment := range attachments {
+		if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(attachment.ContentType)), "image") {
+			continue
+		}
+		imageURL := qqOfficialAttachmentURL(attachment.URL)
+		if imageURL == "" {
+			continue
+		}
+		segments = append(segments, MessageSegment{Type: "image", Data: map[string]string{"url": imageURL, "file": imageURL}})
+	}
+	return segments
+}
+
+// qqOfficialAttachmentURL 规范化附件地址：防守一下。实测都是 https
+// （multimedia.nt.qq.com.cn），拿到的地址缺协议时补上 https，那种地址下载器不认。
+func qqOfficialAttachmentURL(raw string) string {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return ""
+	}
+	if !strings.Contains(value, "://") {
+		value = "https://" + strings.TrimPrefix(value, "//")
+	}
+	return value
+}
+
 // qqOfficialEventFromDispatch 把网关事件映射成统一事件。
 //
 // 语义对照：
@@ -776,7 +871,7 @@ func qqOfficialEventFromDispatch(eventType string, data json.RawMessage, selfID 
 	if err := json.Unmarshal(data, &msg); err != nil {
 		return MessageEvent{}, false
 	}
-	text := strings.TrimSpace(msg.Content)
+	text := qqOfficialFaceText(strings.TrimSpace(msg.Content))
 	quoted := ""
 	if msg.MessageReference != nil {
 		quoted = msg.MessageReference.MessageID
@@ -789,12 +884,14 @@ func qqOfficialEventFromDispatch(eventType string, data json.RawMessage, selfID 
 		}
 	}
 
+	segments := platformTextSegments(text, quoted)
+	segments = append(segments, qqOfficialImageSegments(msg.Attachments)...)
 	event := MessageEvent{
 		Time:       platformEventTime(msg.Timestamp),
 		SelfID:     selfID,
 		MessageID:  msg.ID,
 		RawMessage: text,
-		Segments:   platformTextSegments(text, quoted),
+		Segments:   segments,
 		SenderName: firstNonEmpty(msg.Member.Nick, msg.Author.Username),
 		ToMe:       true,
 	}
