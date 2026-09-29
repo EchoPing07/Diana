@@ -255,3 +255,126 @@ func TestQQGatewayPayloadMarshalOmitsEmptyFields(t *testing.T) {
 		t.Fatalf("heartbeat payload = %s, want {\"op\":1}", encoded)
 	}
 }
+
+// 名字在 ext 的 base64 JSON 里，翻成 [表情:[吃芒果]]；取不到名字时退回 [表情]。
+func TestQQOfficialFaceTextDecodesNames(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{
+			name:    "named face",
+			content: `别这样<faceType=4,faceId="",ext="eyJ0ZXh0IjoiW+WQg+iKkuaenF0ifQ==">`,
+			want:    "别这样[表情:[吃芒果]]",
+		},
+		{
+			name:    "face without a name",
+			content: `<faceType=6,faceId="0",ext="eyJ0ZXh0IjoiIn0=">`,
+			want:    "[表情]",
+		},
+		{
+			name:    "face without ext",
+			content: `<faceType=1,faceId="76">`,
+			want:    "[表情]",
+		},
+		{
+			name:    "plain text untouched",
+			content: "今天天气不错",
+			want:    "今天天气不错",
+		},
+	}
+	for _, testCase := range cases {
+		if got := qqOfficialFaceText(testCase.content); got != testCase.want {
+			t.Fatalf("%s: face text = %q, want %q", testCase.name, got, testCase.want)
+		}
+	}
+}
+
+// 自家表情是空名标签配一张附件图：正文只剩 [表情] 占位，图必须单独拆出来，
+// 否则这条入站就等于纯文字。
+func TestQQOfficialSelfMadeStickerKeepsImageBesidePlaceholder(t *testing.T) {
+	data := json.RawMessage(`{
+	  "id":"msg-11","content":"<faceType=6,faceId=\"0\",ext=\"eyJ0ZXh0IjoiIn0=\">",
+	  "group_openid":"grp-1","author":{"member_openid":"member-1"},
+	  "attachments":[{"content_type":"image/jpeg","filename":"a.jpg","url":"https://multimedia.nt.qq.com.cn/download?fileid=x"}]
+	}`)
+	event, ok := qqOfficialEventFromDispatch("GROUP_MESSAGE_CREATE", data, "bot-1")
+	if !ok {
+		t.Fatal("sticker message was not mapped")
+	}
+	if event.RawMessage != "[表情]" {
+		t.Fatalf("text = %q, want the placeholder", event.RawMessage)
+	}
+	images := 0
+	for _, segment := range event.Segments {
+		if segment.Type == "image" {
+			images++
+		}
+	}
+	if images != 1 {
+		t.Fatalf("segments = %+v, want the sticker image kept", event.Segments)
+	}
+}
+
+// 图片全在 attachments 里、content 只剩文字；不拆成图片段，群友发的图就整个丢了。
+func TestQQOfficialEventFromDispatchAppendsImageAttachments(t *testing.T) {
+	data := json.RawMessage(`{
+	  "id":"msg-9","content":"看这张","group_openid":"grp-1",
+	  "author":{"member_openid":"member-1"},
+	  "attachments":[
+	    {"content_type":"image/jpeg","filename":"a.jpg","url":"https://grouppro.grouppro.qq.com/a.jpg"},
+	    {"content_type":"video/mp4","filename":"b.mp4","url":"https://grouppro.grouppro.qq.com/b.mp4"},
+	    {"content_type":"image/png","filename":"c.png","url":"//grouppro.grouppro.qq.com/c.png"}
+	  ]
+	}`)
+	event, ok := qqOfficialEventFromDispatch("GROUP_AT_MESSAGE_CREATE", data, "bot-1")
+	if !ok {
+		t.Fatal("group message was not mapped")
+	}
+	if event.RawMessage != "看这张" {
+		t.Fatalf("text = %q, want the plain content", event.RawMessage)
+	}
+	var images []MessageSegment
+	for _, segment := range event.Segments {
+		if segment.Type == "image" {
+			images = append(images, segment)
+		}
+	}
+	if len(images) != 2 {
+		t.Fatalf("image segments = %+v, want the two image attachments", event.Segments)
+	}
+	if images[0].Data["url"] != "https://grouppro.grouppro.qq.com/a.jpg" {
+		t.Fatalf("first image url = %q", images[0].Data["url"])
+	}
+	// 官方 CDN 偶尔不给协议头，得补上，否则下载器不认。
+	if images[1].Data["url"] != "https://grouppro.grouppro.qq.com/c.png" {
+		t.Fatalf("second image url = %q, want the https prefix restored", images[1].Data["url"])
+	}
+	// 正文段在前、图片段紧随其后，和 markdown 拆图同序。
+	if event.Segments[len(event.Segments)-1].Type != "image" {
+		t.Fatalf("segments = %+v, want images after the text segment", event.Segments)
+	}
+}
+
+// 只有图片没有文字的消息也要进得来，否则图发出去就石沉大海。
+func TestQQOfficialEventFromDispatchImageOnlyMessage(t *testing.T) {
+	data := json.RawMessage(`{
+	  "id":"msg-10","content":"","group_openid":"grp-1",
+	  "author":{"member_openid":"member-1"},
+	  "attachments":[{"content_type":"image/png","filename":"a.png","url":"https://grouppro.grouppro.qq.com/a.png"}]
+	}`)
+	event, ok := qqOfficialEventFromDispatch("GROUP_AT_MESSAGE_CREATE", data, "bot-1")
+	if !ok {
+		t.Fatal("image-only message was not mapped")
+	}
+	found := false
+	for _, segment := range event.Segments {
+		if segment.Type == "image" && segment.Data["url"] == "https://grouppro.grouppro.qq.com/a.png" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("segments = %+v, want the image segment kept", event.Segments)
+	}
+}
