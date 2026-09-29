@@ -726,11 +726,46 @@ type openAIChatCompletionRequest struct {
 	Messages          []openAIChatCompletionMessage `json:"messages"`
 	Temperature       *float64                      `json:"temperature,omitempty"`
 	ReasoningEffort   string                        `json:"reasoning_effort,omitempty"`
+	Thinking          *openAIChatThinking           `json:"thinking,omitempty"`
 	MaxTokens         int64                         `json:"max_tokens,omitempty"`
 	Stream            bool                          `json:"stream"`
 	Tools             []openAIChatTool              `json:"tools,omitempty"`
 	ToolChoice        any                           `json:"tool_choice,omitempty"`
 	ParallelToolCalls *bool                         `json:"parallel_tool_calls,omitempty"`
+}
+
+// openAIChatThinking 是 DeepSeek 的思考开关。它的 reasoning_effort 只认
+// low/high/max，关思考要靠 thinking.type=disabled。
+type openAIChatThinking struct {
+	Type string `json:"type"`
+}
+
+// deepSeekReasoningEffort 把统一档位折算成 DeepSeek 认的三档，和它文档里的
+// 兼容映射一致；自己折算是为了不依赖网关或旧版本的隐式兼容。
+var deepSeekReasoningEffort = map[string]string{
+	"minimal": "low",
+	"low":     "low",
+	"medium":  "high",
+	"high":    "high",
+	"xhigh":   "high",
+	"max":     "max",
+	"ultra":   "max",
+}
+
+// chatCompletionReasoning 把统一的 reasoning_effort 翻成 Chat Completions 的字段。
+// DeepSeek 要改写：none 换成关闭思考；其余档位折算后同时显式打开思考，否则
+// 默认不思考的模型（如 deepseek-chat）只收到档位也不会思考。其他端点原样发。
+func (c *openAICompatibleClient) chatCompletionReasoning(req GenerateRequest) (string, *openAIChatThinking) {
+	if req.ReasoningEffort == "" || !isDeepSeekTarget(c.cfg, req.Model) {
+		return req.ReasoningEffort, nil
+	}
+	if req.ReasoningEffort == "none" {
+		return "", &openAIChatThinking{Type: "disabled"}
+	}
+	if effort, ok := deepSeekReasoningEffort[req.ReasoningEffort]; ok {
+		return effort, &openAIChatThinking{Type: "enabled"}
+	}
+	return req.ReasoningEffort, nil
 }
 
 type openAIChatTool struct {
@@ -784,16 +819,16 @@ type openAIChatCompletionInputAudio struct {
 // generateChatCompletion 使用 Chat Completions API 生成回复。
 func (c *openAICompatibleClient) generateChatCompletion(ctx context.Context, req GenerateRequest) (*GenerateResponse, error) {
 	params := openAIChatCompletionRequest{
-		PromptCacheKey:  req.PromptCacheKey,
-		Model:           req.Model,
-		Messages:        openAIChatCompletionMessages(req.Messages, req.Tools),
-		Temperature:     req.Temperature,
-		ReasoningEffort: req.ReasoningEffort,
-		MaxTokens:       req.MaxOutputTokens,
-		Stream:          false,
-		Tools:           openAIChatTools(req.Tools),
-		ToolChoice:      openAIChatToolChoice(req),
+		PromptCacheKey: req.PromptCacheKey,
+		Model:          req.Model,
+		Messages:       openAIChatCompletionMessages(req.Messages, req.Tools),
+		Temperature:    req.Temperature,
+		MaxTokens:      req.MaxOutputTokens,
+		Stream:         false,
+		Tools:          openAIChatTools(req.Tools),
+		ToolChoice:     openAIChatToolChoice(req),
 	}
+	params.ReasoningEffort, params.Thinking = c.chatCompletionReasoning(req)
 	if len(req.Tools) > 0 {
 		parallel := false
 		params.ParallelToolCalls = &parallel
