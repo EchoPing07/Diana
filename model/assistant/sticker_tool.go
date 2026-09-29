@@ -35,6 +35,10 @@ const (
 	stickerJustSentFactor    = 0.5  // 10 分钟内刚发过，再乘一次
 	stickerUsagePenaltyStep  = 0.05 // 本会话每发过一次降 5%
 	stickerUsagePenaltyFloor = 0.7  // 最多降到 70%
+	// 表情包默认跨群共享后，同一张图可能刚在别的群发过。群友常常同在几个群里，照样算重复：
+	// 刚发过时降到 50%，之后按半衰期回升，一天后基本不再影响。
+	stickerElsewhereSentFactor   = 0.5
+	stickerElsewhereHalfLifeSecs = 6 * 3600
 	// 命中的候选先取「返回数量 × 这个倍数」进池子，再按分数加权抽，排名靠前的更容易被抽中。
 	stickerMatchedPoolFactor = 2
 	stickerBackgroundTagTTL  = 3 * time.Minute
@@ -74,13 +78,18 @@ type stickerCandidate struct {
 	Description string
 	Tags        []string
 	Tagged      bool
-	FromAssets  bool
-	Path        string
-	Hash        string
-	MessageID   string
-	EventTime   int64
-	LastSentAt  int64
-	SentCount   int
+	// Category 是画风大类；CategoryKnown 表示判过（判不出来也算），没判过的后台补。
+	Category      string
+	CategoryKnown bool
+	FromAssets    bool
+	Path          string
+	Hash          string
+	MessageID     string
+	EventTime     int64
+	LastSentAt    int64
+	SentCount     int
+	// ElsewhereLastSentAt 是机器人最近一次在别的会话里发这张图的时间。
+	ElsewhereLastSentAt int64
 	// RecentlySent 是这张或和它算同一张的图刚在本会话发过，见 rankStickerCandidates。
 	RecentlySent  bool
 	Score         float64
@@ -94,6 +103,7 @@ type stickerSearchItem struct {
 	ID          string   `json:"id"`
 	Name        string   `json:"name"`
 	Tags        []string `json:"tags,omitempty"`
+	Category    string   `json:"category,omitempty"`
 	Description string   `json:"description,omitempty"`
 	Matched     bool     `json:"matched"`
 	MessageID   string   `json:"-"`
@@ -277,11 +287,13 @@ func (t *dianaStickerTool) annotateNow(ctx context.Context, candidate *stickerCa
 		log.Printf("diana sticker annotate failed: %v", err)
 		return false
 	}
-	gist, tags := parseStickerAnnotation(annotation)
+	gist, tags, category := parseStickerAnnotation(annotation)
 	candidate.Description = compactRecallImageDescription(gist)
 	candidate.Tags = tags
+	candidate.Category = category
 	candidate.Tagged = true
-	t.runtime.saveStickerTags(candidate.Hash, candidate.Description, tags)
+	candidate.CategoryKnown = true
+	t.runtime.saveStickerTags(candidate.Hash, candidate.Description, tags, category)
 	return true
 }
 
@@ -448,8 +460,8 @@ func stickerFileMatchesHash(path, expected string) bool {
 
 func (t *dianaStickerTool) candidates(ctx context.Context, query string) ([]stickerCandidate, error) {
 	limit := t.settings.Int(stickerSettingHistoryLimit, 1000)
-	shareGroups := t.settings.Bool(stickerSettingCrossGroup, false)
-	sharePrivate := t.settings.Bool(stickerSettingCrossPrivate, false)
+	shareGroups := t.settings.Bool(stickerSettingCrossGroup, true)
+	sharePrivate := t.settings.Bool(stickerSettingCrossPrivate, true)
 	assetQuery := StickerHistoryQuery{
 		Session:          sessionKey(t.event),
 		ContextNamespace: strings.TrimSpace(t.event.ContextNamespace),
@@ -539,7 +551,7 @@ func stickerCandidatesFromAssets(assets []StickerAsset, currentSession string, i
 		candidates = append(candidates, stickerCandidate{
 			ID: hash[:24], Summary: summary, Path: path, Hash: hash, MessageID: asset.MessageID, EventTime: asset.EventTime,
 			Description: strings.TrimSpace(firstNonEmpty(asset.Gist, asset.Description)),
-			Tags:        asset.Tags, Tagged: asset.Tagged, FromAssets: true, LastSentAt: asset.LastSentAt, SentCount: asset.SentCount,
+			Tags:        asset.Tags, Tagged: asset.Tagged, Category: asset.Category, CategoryKnown: asset.CategoryKnown, FromAssets: true, LastSentAt: asset.LastSentAt, SentCount: asset.SentCount, ElsewhereLastSentAt: asset.ElsewhereLastSentAt,
 			SemanticScore: semanticScores[stickerCandidateEventKey(source)], SourceEvent: source,
 			SharedGroup:   asset.Kind == EventKindGroup && asset.Session != currentSession,
 			SharedPrivate: asset.Kind == EventKindPrivate && asset.Session != currentSession,
@@ -618,7 +630,7 @@ func rankStickerCandidates(candidates []stickerCandidate, query string, now int6
 	docs := make([]fields, len(candidates))
 	for index, candidate := range candidates {
 		docs[index] = fields{
-			strong: strings.ToLower(candidate.Summary + "\n" + strings.Join(candidate.Tags, "\n")),
+			strong: strings.ToLower(candidate.Summary + "\n" + strings.Join(candidate.Tags, "\n") + "\n" + candidate.Category),
 			weak:   strings.ToLower(candidate.Description),
 		}
 	}
@@ -717,6 +729,11 @@ func stickerRepeatFactor(candidate stickerCandidate, now int64) float64 {
 	}
 	if candidate.SentCount > 0 {
 		factor *= math.Max(1-stickerUsagePenaltyStep*float64(candidate.SentCount), stickerUsagePenaltyFloor)
+	}
+	// 本会话发得更晚的话，上面几项已经管住了，不再叠别处的。
+	if candidate.ElsewhereLastSentAt > candidate.LastSentAt {
+		age := math.Max(float64(now-candidate.ElsewhereLastSentAt), 0)
+		factor *= 1 - (1-stickerElsewhereSentFactor)*math.Exp2(-age/stickerElsewhereHalfLifeSecs)
 	}
 	return factor
 }
@@ -826,10 +843,11 @@ func stickerCandidateEventKey(event MessageEvent) string {
 	return sessionKey(event) + "\x00" + strings.TrimSpace(event.MessageID)
 }
 
-// parseStickerAnnotation 从表情包标注里拆出简介和末尾「标签：」行。compactRecallImageDescription
-// 会把换行压成空格，所以按最后一个「标签」标记切分；没有标签行就整段当简介。
-func parseStickerAnnotation(text string) (string, []string) {
-	text = strings.TrimSpace(text)
+// parseStickerAnnotation 从表情包标注里拆出简介、「分类：」行的画风大类和末尾「标签：」行。
+// compactRecallImageDescription 会把换行压成空格，所以按最后一个标记切分；没有标签行就整段当简介，
+// 没有分类行（比如主人改过提示词）大类留空。
+func parseStickerAnnotation(text string) (string, []string, string) {
+	text, category := extractStickerCategory(strings.TrimSpace(text))
 	marker, at := "", -1
 	for _, candidate := range []string{"标签：", "标签:"} {
 		if index := strings.LastIndex(text, candidate); index > at {
@@ -837,7 +855,7 @@ func parseStickerAnnotation(text string) (string, []string) {
 		}
 	}
 	if at < 0 {
-		return text, nil
+		return text, nil, category
 	}
 	gist := strings.TrimSpace(text[:at])
 	var tags []string
@@ -855,7 +873,31 @@ func parseStickerAnnotation(text string) (string, []string) {
 			break
 		}
 	}
-	return gist, tags
+	return gist, tags, category
+}
+
+// extractStickerCategory 取出「分类：xx」里的画风大类，并把这一段从标注里删掉。分类行可能在
+// 标签行前面也可能在后面，值只取到第一个空白或标点为止。
+func extractStickerCategory(text string) (string, string) {
+	marker, at := "", -1
+	for _, candidate := range []string{"分类：", "分类:"} {
+		if index := strings.LastIndex(text, candidate); index > at {
+			marker, at = candidate, index
+		}
+	}
+	if at < 0 {
+		return text, ""
+	}
+	rest := text[at+len(marker):]
+	end := strings.IndexFunc(rest, func(r rune) bool {
+		return unicode.IsSpace(r) || strings.ContainsRune("、，,;；/|。.", r)
+	})
+	if end < 0 {
+		end = len(rest)
+	}
+	value := strings.Trim(rest[:end], "「」\"'")
+	cleaned := strings.TrimSpace(strings.TrimSpace(text[:at]) + " " + strings.TrimSpace(strings.TrimLeft(rest[end:], "、，,;；/|。. ")))
+	return cleaned, NormalizeStickerCategory(value)
 }
 
 func (r *Runtime) stickerTagStore() StickerTagStore {
@@ -866,14 +908,14 @@ func (r *Runtime) stickerTagStore() StickerTagStore {
 	return tagStore
 }
 
-func (r *Runtime) saveStickerTags(hash, gist string, tags []string) {
+func (r *Runtime) saveStickerTags(hash, gist string, tags []string, category string) {
 	store := r.stickerTagStore()
 	if store == nil || hash == "" {
 		return
 	}
 	saveCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if err := store.SaveStickerTags(saveCtx, StickerTagRecord{ContentSHA256: hash, Gist: gist, Tags: tags, Version: stickerAnnotationVersion}); err != nil {
+	if err := store.SaveStickerTags(saveCtx, StickerTagRecord{ContentSHA256: hash, Gist: gist, Tags: tags, Category: category, Version: stickerAnnotationVersion}); err != nil {
 		log.Printf("diana sticker tags save failed: %v", err)
 	}
 }
@@ -906,17 +948,19 @@ func (t *dianaStickerTool) enrichCandidateDescriptions(ctx context.Context, cand
 				if err != nil {
 					continue
 				}
-				gist, tags := parseStickerAnnotation(annotation)
+				gist, tags, category := parseStickerAnnotation(annotation)
 				candidate.Description = compactRecallImageDescription(gist)
 				candidate.Tags = tags
+				candidate.Category = category
 				candidate.Tagged = true
+				candidate.CategoryKnown = true
 				t.runtime.saveRecallImageDescription(&recallImageTarget{
 					contentSHA256:     candidate.Hash,
 					description:       candidate.Description,
 					descriptionSource: "vision",
 					sourceMessageIDs:  []string{candidate.MessageID},
 				}, candidate.SourceEvent)
-				t.runtime.saveStickerTags(candidate.Hash, candidate.Description, tags)
+				t.runtime.saveStickerTags(candidate.Hash, candidate.Description, tags, category)
 				t.runtime.refreshMessageImageSearchText(ctx, candidate.SourceEvent)
 			}
 		}()
@@ -939,7 +983,8 @@ func (t *dianaStickerTool) tagCandidatesInBackground(ctx context.Context, candid
 	}
 	var pending []stickerCandidate
 	for _, candidate := range candidates {
-		if !candidate.FromAssets || candidate.Tagged || candidate.Hash == "" {
+		// 画风大类是后加的：之前标过的没有这一栏，也在这里补一次。
+		if !candidate.FromAssets || (candidate.Tagged && candidate.CategoryKnown) || candidate.Hash == "" {
 			continue
 		}
 		if _, running := t.runtime.stickerTagging.LoadOrStore(candidate.Hash, true); running {
@@ -957,8 +1002,8 @@ func (t *dianaStickerTool) tagCandidatesInBackground(ctx context.Context, candid
 		for _, candidate := range pending {
 			annotation, err := t.runtime.describeStickerImage(tagCtx, t.event, candidate.Path)
 			if err == nil {
-				gist, tags := parseStickerAnnotation(annotation)
-				t.runtime.saveStickerTags(candidate.Hash, compactRecallImageDescription(gist), tags)
+				gist, tags, category := parseStickerAnnotation(annotation)
+				t.runtime.saveStickerTags(candidate.Hash, compactRecallImageDescription(gist), tags, category)
 			}
 			t.runtime.stickerTagging.Delete(candidate.Hash)
 		}
@@ -998,7 +1043,7 @@ func stickerSearchItems(candidates []stickerCandidate) []stickerSearchItem {
 			scope = "shared_private"
 		}
 		items = append(items, stickerSearchItem{
-			ID: candidate.ID, Name: candidate.Summary, Tags: candidate.Tags,
+			ID: candidate.ID, Name: candidate.Summary, Tags: candidate.Tags, Category: candidate.Category,
 			Description: truncateRunes(candidate.Description, 240), Matched: candidate.Score > 0,
 			MessageID: candidate.MessageID, Scope: scope,
 		})

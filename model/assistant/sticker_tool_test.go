@@ -90,7 +90,7 @@ func (s *stickerHistoryStore) ListRecentStickerEvents(_ context.Context, query S
 
 func TestDefaultPluginManagerIncludesStickerSender(t *testing.T) {
 	state, ok := NewDefaultPluginManager().Get(stickerPluginID)
-	if !ok || !state.Enabled || !state.Manifest.BuiltIn || state.Manifest.Version != "0.2.3" {
+	if !ok || !state.Enabled || !state.Manifest.BuiltIn || state.Manifest.Version != "0.2.4" {
 		t.Fatalf("sticker plugin state=%#v ok=%v", state, ok)
 	}
 	if len(state.Manifest.Settings) != 8 {
@@ -365,7 +365,11 @@ func TestStickerToolSearchesThenSendsOnlyCurrentConversationSticker(t *testing.T
 	channel := &recordingChannel{}
 	runtime := NewRuntime(BotConfig{}, channel, NewPluginManager(), nil, nil, nil, nil)
 	runtime.SetMessageHistoryStore(store)
-	tool := newDianaStickerTool(runtime, event, SettingValues{stickerSettingHistoryLimit: 1000, stickerSettingSearchResults: 8, stickerSettingIncludeGeneric: true})
+	// 两个共享开关都关掉时只认当前会话的表情包。
+	tool := newDianaStickerTool(runtime, event, SettingValues{
+		stickerSettingHistoryLimit: 1000, stickerSettingSearchResults: 8, stickerSettingIncludeGeneric: true,
+		stickerSettingCrossGroup: false, stickerSettingCrossPrivate: false,
+	})
 
 	output, err := tool.Run(context.Background(), map[string]any{"operation": "search", "query": "无语"})
 	if err != nil {
@@ -405,7 +409,7 @@ func TestStickerToolSearchesThenSendsOnlyCurrentConversationSticker(t *testing.T
 
 	crossGroupTool := newDianaStickerTool(runtime, event, SettingValues{
 		stickerSettingHistoryLimit: 1000, stickerSettingSearchResults: 8,
-		stickerSettingIncludeGeneric: true, stickerSettingCrossGroup: true,
+		stickerSettingIncludeGeneric: true, stickerSettingCrossGroup: true, stickerSettingCrossPrivate: false,
 	})
 	output, err = crossGroupTool.Run(context.Background(), map[string]any{"operation": "search", "query": "无语"})
 	if err != nil {
@@ -420,7 +424,7 @@ func TestStickerToolSearchesThenSendsOnlyCurrentConversationSticker(t *testing.T
 
 	crossPrivateTool := newDianaStickerTool(runtime, event, SettingValues{
 		stickerSettingHistoryLimit: 1000, stickerSettingSearchResults: 8,
-		stickerSettingIncludeGeneric: true, stickerSettingCrossPrivate: true,
+		stickerSettingIncludeGeneric: true, stickerSettingCrossGroup: false, stickerSettingCrossPrivate: true,
 	})
 	output, err = crossPrivateTool.Run(context.Background(), map[string]any{"operation": "search", "query": "无语"})
 	if err != nil {
@@ -431,6 +435,23 @@ func TestStickerToolSearchesThenSendsOnlyCurrentConversationSticker(t *testing.T
 	}
 	if len(search.Candidates) != 2 || search.Candidates[0].Scope == search.Candidates[1].Scope {
 		t.Fatalf("cross-private search=%#v", search)
+	}
+
+	// 没配过共享开关时默认跨群、跨私聊都能搜到。
+	defaultTool := newDianaStickerTool(runtime, event, SettingValues{stickerSettingHistoryLimit: 1000, stickerSettingSearchResults: 8, stickerSettingIncludeGeneric: true})
+	output, err = defaultTool.Run(context.Background(), map[string]any{"operation": "search", "query": "无语"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(output), &search); err != nil {
+		t.Fatal(err)
+	}
+	scopes := map[string]bool{}
+	for _, candidate := range search.Candidates {
+		scopes[candidate.Scope] = true
+	}
+	if len(search.Candidates) != 3 || !scopes["current_conversation"] || !scopes["shared_group"] || !scopes["shared_private"] {
+		t.Fatalf("default search=%#v", search)
 	}
 }
 
@@ -510,6 +531,19 @@ func TestRankStickerCandidatesPenalizesRepeats(t *testing.T) {
 	if got := stickerRepeatFactor(stickerCandidate{RecentlySent: true, LastSentAt: now - 60}, now); math.Abs(got-stickerRecentSendFactor*stickerJustSentFactor) > 1e-9 {
 		t.Fatalf("just sent factor = %v", got)
 	}
+	// 刚在别的群发过：降到一半；过一个半衰期回到 75%；一天后几乎不影响。
+	for _, step := range []struct {
+		age  int64
+		want float64
+	}{{0, 0.5}, {stickerElsewhereHalfLifeSecs, 0.75}, {24 * 3600, 1 - 0.5/16}} {
+		if got := stickerRepeatFactor(stickerCandidate{ElsewhereLastSentAt: now - step.age}, now); math.Abs(got-step.want) > 1e-9 {
+			t.Fatalf("elsewhere age=%d factor=%v want %v", step.age, got, step.want)
+		}
+	}
+	// 本会话发得更晚时只按本会话算，不再叠别处的。
+	if got := stickerRepeatFactor(stickerCandidate{LastSentAt: now - 3600, ElsewhereLastSentAt: now - 7200}, now); got != 1 {
+		t.Fatalf("elsewhere older than local send = %v", got)
+	}
 }
 
 // 命中的排在前面；不够时随机补位，没发过的先补，发过的其次，最近发过的最后。
@@ -561,13 +595,18 @@ func TestSelectStickerCandidatesSamplesAmongTopMatches(t *testing.T) {
 }
 
 func TestParseStickerAnnotation(t *testing.T) {
-	gist, tags := parseStickerAnnotation("猫猫翻白眼，表示对离谱发言很无语。 标签：无语、翻白眼、离谱，猫猫。")
-	if gist != "猫猫翻白眼，表示对离谱发言很无语。" || strings.Join(tags, "|") != "无语|翻白眼|离谱|猫猫" {
-		t.Fatalf("gist=%q tags=%q", gist, tags)
+	gist, tags, category := parseStickerAnnotation("猫猫翻白眼，表示对离谱发言很无语。 分类：动物 标签：无语、翻白眼、离谱，猫猫。")
+	if gist != "猫猫翻白眼，表示对离谱发言很无语。" || strings.Join(tags, "|") != "无语|翻白眼|离谱|猫猫" || category != "动物" {
+		t.Fatalf("gist=%q tags=%q category=%q", gist, tags, category)
 	}
-	gist, tags = parseStickerAnnotation("只有简介没有标签")
-	if gist != "只有简介没有标签" || tags != nil {
-		t.Fatalf("gist=%q tags=%q", gist, tags)
+	// 分类写在标签后面、用了近义说法也认。
+	gist, tags, category = parseStickerAnnotation("少女捂脸害羞。 标签：害羞、捂脸 分类：动漫角色")
+	if gist != "少女捂脸害羞。" || strings.Join(tags, "|") != "害羞|捂脸" || category != "二次元" {
+		t.Fatalf("gist=%q tags=%q category=%q", gist, tags, category)
+	}
+	gist, tags, category = parseStickerAnnotation("只有简介没有标签")
+	if gist != "只有简介没有标签" || tags != nil || category != "" {
+		t.Fatalf("gist=%q tags=%q category=%q", gist, tags, category)
 	}
 }
 
