@@ -13,33 +13,45 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/SuInk/diana/model/netguard"
 )
 
 const (
+	// 开放平台富媒体接口的 file_type：1 图片、2 视频、3 语音、4 文件。
+	qqFileTypeImage = 1
+	qqFileTypeVideo = 2
+	qqFileTypeAudio = 3
+
 	// qqMaxImageBytes 是图片的软上限。
 	qqMaxImageBytes = 20 << 20
+	// qqMaxVideoBytes 是视频上限。36MB 分片上传通过，210MB 在预上传被拒
+	//（500/850012），取 100MB 留出余量。
+	qqMaxVideoBytes = 100 << 20
+	// qqMaxAudioBytes 是语音/音频上限；平台会转码，过大的音频无实际意义。
+	qqMaxAudioBytes = 20 << 20
 	// qqMD510MBoundary 是 md5_10m 取文件头部的字节数（平台约定）。
 	qqMD510MBoundary = 10002432
 	qqUploadRetries  = 3
 )
 
-// qqUploadImage 把一张图片分片上传到会话，返回可放进 media.file_info 的凭据。
+// qqUploadMedia 把一个富媒体上传到会话，返回可放进 media.file_info 的凭据。
 //
-// prefix 是 /v2/groups/{id} 或 /v2/users/{id}。图片来源可能是本地文件、内联数据或
-// 外链，统一读成字节再上传：外链不一定是公网可达的，直接交给平台下载会失败。
-func (c *QQOfficialChannel) qqUploadImage(ctx context.Context, auth, prefix, source string) (string, error) {
-	data, contentType, err := readHistoryImageSource(ctx, source, 0)
+// prefix 是 /v2/groups/{id} 或 /v2/users/{id}。媒体来源可能是本地文件、内联数据或
+// 外链，统一读成字节再上传：外链不一定公网可达，直接交给平台下载会失败。
+// 图片、视频、语音共用同一条分片上传链路，差别只在 file_type 与大小上限。
+func (c *QQOfficialChannel) qqUploadMedia(ctx context.Context, auth, prefix, source string, fileType int, maxBytes int64) (string, error) {
+	data, name, err := qqMediaPayload(ctx, source, fileType, maxBytes)
 	if err != nil {
-		return "", fmt.Errorf("qq: 读取图片失败: %w", err)
+		return "", err
 	}
-	if len(data) > qqMaxImageBytes {
-		return "", fmt.Errorf("qq: 图片 %d 字节超过上限 %d", len(data), qqMaxImageBytes)
-	}
-	name := "image" + imessageExtensionFor(contentType)
 	c.mu.RLock()
 	client := c.client
 	c.mu.RUnlock()
@@ -69,7 +81,7 @@ func (c *QQOfficialChannel) qqUploadImage(ctx context.Context, auth, prefix, sou
 		} `json:"parts"`
 	}
 	if err := call("/upload_prepare", map[string]any{
-		"file_type": 1,
+		"file_type": fileType,
 		"file_size": strconv.Itoa(len(data)),
 		"file_name": name,
 		"md5":       hex.EncodeToString(md5Sum[:]),
@@ -94,7 +106,7 @@ func (c *QQOfficialChannel) qqUploadImage(ctx context.Context, auth, prefix, sou
 			return "", fmt.Errorf("qq: 分片 %d 的大小无效: %q", part.Index, sizeText)
 		}
 		if offset >= len(data) {
-			return "", fmt.Errorf("qq: 分片计划超出图片长度")
+			return "", fmt.Errorf("qq: 分片计划超出媒体长度")
 		}
 		end := min(offset+size, len(data))
 		chunk := data[offset:end]
@@ -127,14 +139,14 @@ func (c *QQOfficialChannel) qqUploadImage(ctx context.Context, auth, prefix, sou
 		}
 	}
 	if offset != len(data) {
-		return "", fmt.Errorf("qq: 分片计划没有覆盖整张图片")
+		return "", fmt.Errorf("qq: 分片计划没有覆盖整个媒体")
 	}
 
 	var merged struct {
 		FileInfo string `json:"file_info"`
 	}
 	if err := call("/files", map[string]any{
-		"file_type":    1,
+		"file_type":    fileType,
 		"file_name":    name,
 		"upload_id":    prepared.UploadID,
 		"srv_send_msg": false,
@@ -145,6 +157,74 @@ func (c *QQOfficialChannel) qqUploadImage(ctx context.Context, auth, prefix, sou
 		return "", fmt.Errorf("qq: 合并结果缺少 file_info")
 	}
 	return merged.FileInfo, nil
+}
+
+// qqMediaPayload 读出上传用的字节和文件名。图片走 readHistoryImageSource（内联
+// 数据、下载缓存均在该路径）；视频和音频读本地文件，外链先下载到缓存再读。
+func qqMediaPayload(ctx context.Context, source string, fileType int, maxBytes int64) ([]byte, string, error) {
+	if fileType == qqFileTypeImage {
+		data, contentType, err := readHistoryImageSource(ctx, source, 0)
+		if err != nil {
+			return nil, "", fmt.Errorf("qq: 读取图片失败: %w", err)
+		}
+		if int64(len(data)) > maxBytes {
+			return nil, "", fmt.Errorf("qq: 图片 %d 字节超过上限 %d", len(data), maxBytes)
+		}
+		return data, "image" + imessageExtensionFor(contentType), nil
+	}
+	kind, defaultName := "视频", "video.mp4"
+	if fileType == qqFileTypeAudio {
+		kind, defaultName = "音频", "audio.mp3"
+	}
+	data, err := qqReadMediaBytes(ctx, source, maxBytes)
+	if err != nil {
+		return nil, "", fmt.Errorf("qq: 读取%s失败: %w", kind, err)
+	}
+	return data, qqUploadName(source, defaultName), nil
+}
+
+// qqReadMediaBytes 读出非图片媒体的字节：本地路径直接读，外链下载到缓存再读。
+func qqReadMediaBytes(ctx context.Context, source string, maxBytes int64) ([]byte, error) {
+	value := strings.TrimSpace(source)
+	if path := rawAbsoluteMediaPath(value); path != "" {
+		info, err := os.Stat(path)
+		if err != nil || info.IsDir() {
+			return nil, fmt.Errorf("文件不可读: %s", filepath.Base(path))
+		}
+		if info.Size() > maxBytes {
+			return nil, fmt.Errorf("文件 %d 字节超过上限 %d", info.Size(), maxBytes)
+		}
+		return os.ReadFile(path)
+	}
+	remote := normalizedHTTPURL(value)
+	if remote == "" {
+		return nil, fmt.Errorf("无法识别的媒体来源")
+	}
+	callCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	path, _, release, err := acquireMediaDownload(callCtx, netguard.NewPublicHTTPClient(60*time.Second), remote, "media", "", "qq", maxBytes)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return os.ReadFile(path)
+}
+
+// qqUploadName 从来源中取平台可识别的文件名；取不到或没有扩展名时用默认名。
+func qqUploadName(source, defaultName string) string {
+	value := strings.TrimSpace(source)
+	base := ""
+	if remote := normalizedHTTPURL(value); remote != "" {
+		if parsed, err := url.Parse(remote); err == nil {
+			base = filepath.Base(parsed.Path)
+		}
+	} else if path := rawAbsoluteMediaPath(value); path != "" {
+		base = filepath.Base(path)
+	}
+	if base == "" || base == "." || base == "/" || filepath.Ext(base) == "" {
+		return defaultName
+	}
+	return base
 }
 
 // qqPutPart 把一个分片 PUT 到预签名地址；这个地址自带签名，不能再带机器人的鉴权头。

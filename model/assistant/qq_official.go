@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -33,6 +34,10 @@ const (
 	qqOfficialAPIBase       = "https://api.sgroup.qq.com"
 	qqOfficialSandboxAPI    = "https://sandbox.api.sgroup.qq.com"
 	qqOfficialHeartbeatSlop = 5 * time.Second
+
+	// qqDedupErrorCode 是开放平台「消息被去重，请检查请求msgseq」的错误码。同一
+	// msg_id 下连发多条时偶发命中，换一个 msg_seq 重发一次即可通过。
+	qqDedupErrorCode = "40054005"
 
 	// qqIntentGroupAndC2C 订阅群聊 @ 消息和单聊消息，这是「QQ 机器人」这个形态
 	// 的主场景；频道相关意图另算，没开通频道能力时订阅了会被网关拒绝。
@@ -433,7 +438,7 @@ func (c *QQOfficialChannel) SendWithResult(ctx context.Context, msg OutgoingMess
 		return nil, fmt.Errorf("qq: 缺少会话标识")
 	}
 	text := platformOutboundText(msg)
-	if text == "" && len(msg.ImageURLs) == 0 {
+	if text == "" && len(msg.ImageURLs) == 0 && len(msg.VideoURLs) == 0 && len(msg.AudioURLs) == 0 {
 		return nil, nil
 	}
 	endpoint := c.apiBase() + "/v2/users/" + target + "/messages"
@@ -465,14 +470,26 @@ func (c *QQOfficialChannel) SendWithResult(ctx context.Context, msg OutgoingMess
 				body["msg_seq"] = c.nextPassiveSeq(replyID)
 			}
 		}
-		raw, err := platformJSONRequest(ctx, client, http.MethodPost, endpoint, map[string]string{
-			"Authorization": auth,
-		}, body)
-		if err != nil {
+		request := func() ([]byte, error) {
+			return platformJSONRequest(ctx, client, http.MethodPost, endpoint, map[string]string{
+				"Authorization": auth,
+			}, body)
+		}
+		raw, err := request()
+		if err != nil && strings.Contains(err.Error(), "http 401") {
 			// token 过期时开放平台返回 401；丢掉缓存让下一次重新换。
-			if strings.Contains(err.Error(), "http 401") {
+			c.tokens.Invalidate()
+		}
+		if err != nil && strings.Contains(err.Error(), qqDedupErrorCode) && replyID != "" && !isGuild {
+			// 40054005「消息被去重」：换一个 msg_seq 重发一次可通过，原样重发
+			// 只会再次被拒。
+			body["msg_seq"] = c.nextPassiveSeq(replyID)
+			raw, err = request()
+			if err != nil && strings.Contains(err.Error(), "http 401") {
 				c.tokens.Invalidate()
 			}
+		}
+		if err != nil {
 			return "", fmt.Errorf("qq: 发送失败: %w", err)
 		}
 		var envelope struct {
@@ -502,25 +519,54 @@ func (c *QQOfficialChannel) SendWithResult(ctx context.Context, msg OutgoingMess
 		}
 		firstID = id
 	}
-	if len(msg.ImageURLs) > 0 && isGuild {
-		return nil, fmt.Errorf("qq: 频道消息暂不支持发送图片")
+	if isGuild && (len(msg.ImageURLs) > 0 || len(msg.VideoURLs) > 0 || len(msg.AudioURLs) > 0) {
+		return nil, fmt.Errorf("qq: 频道消息暂不支持发送富媒体")
 	}
 	prefix := c.apiBase() + "/v2/users/" + target
 	if isGroup {
 		prefix = c.apiBase() + "/v2/groups/" + target
 	}
+	// sendMedia 上传一个媒体并以 msg_type 7 的富媒体消息发出。图片、视频、语音
+	// 共用同一条分片上传链路，差别只在 file_type。
+	sendMedia := func(source string, fileType int, maxBytes int64) (string, error) {
+		fileInfo, err := c.qqUploadMedia(ctx, auth, prefix, source, fileType, maxBytes)
+		if err != nil {
+			return "", err
+		}
+		return post(map[string]any{
+			"msg_type": 7,
+			"media":    map[string]any{"file_info": fileInfo},
+		})
+	}
 	for _, source := range msg.ImageURLs {
 		if strings.TrimSpace(source) == "" {
 			continue
 		}
-		fileInfo, err := c.qqUploadImage(ctx, auth, prefix, source)
+		id, err := sendMedia(source, qqFileTypeImage, qqMaxImageBytes)
 		if err != nil {
 			return nil, err
 		}
-		id, err := post(map[string]any{
-			"msg_type": 7,
-			"media":    map[string]any{"file_info": fileInfo},
-		})
+		if firstID == "" {
+			firstID = id
+		}
+	}
+	for _, source := range msg.VideoURLs {
+		if strings.TrimSpace(source) == "" {
+			continue
+		}
+		id, err := sendMedia(source, qqFileTypeVideo, qqMaxVideoBytes)
+		if err != nil {
+			return nil, err
+		}
+		if firstID == "" {
+			firstID = id
+		}
+	}
+	for _, source := range msg.AudioURLs {
+		if strings.TrimSpace(source) == "" {
+			continue
+		}
+		id, err := sendMedia(source, qqFileTypeAudio, qqMaxAudioBytes)
 		if err != nil {
 			return nil, err
 		}
@@ -840,10 +886,16 @@ func stripQQBotMentionTokens(text string, mentions []qqOfficialMention, selfID s
 
 // qqOfficialAttachment 是消息附带的一条富媒体附件。官方只给元信息和下载地址，
 // 图片、语音、视频、文件都靠 content_type 区分。
+//
+// content_type 不全是 MIME：语音是裸值 voice（附带 asr_refer_text 平台转写和
+// voice_wav_url），文件是裸值 file（md / zip / mp3 的取值相同，区分只能靠 filename
+// 扩展名）。size 用于文件解析决定是否嗅探，其余字段不使用就不声明。
 type qqOfficialAttachment struct {
-	ContentType string `json:"content_type"`
-	Filename    string `json:"filename"`
-	URL         string `json:"url"`
+	ContentType  string `json:"content_type"`
+	Filename     string `json:"filename"`
+	URL          string `json:"url"`
+	Size         int64  `json:"size"`
+	AsrReferText string `json:"asr_refer_text"`
 }
 
 var (
@@ -862,7 +914,7 @@ var (
 // ext）退回 [表情]，至少让模型知道这里有个表情。
 //
 // 表情图不在这里：官方对表情商城这类只给名字、不给图，自家表情则是空名标签配一张
-// 附件图，图案由 qqOfficialImageSegments 单独拆成图片段，这个占位不代替它。
+// 附件图，图案由 qqOfficialMediaSegments 单独拆成图片段，这个占位不代替它。
 func qqOfficialFaceText(content string) string {
 	if !strings.Contains(content, "<faceType") {
 		return content
@@ -894,25 +946,60 @@ func qqOfficialFaceTagName(tag string) string {
 	return strings.TrimSpace(payload.Text)
 }
 
-// qqOfficialImageSegments 把图片附件拆成图片段，紧跟正文段之后。官方事件的富媒体
-// 全在 attachments 里、content 只剩文字，不拆出来群友发的图就整个丢了；拆出来后
-// 和 markdown 拆图一样走现有的识图与图片描述流程。
+// qqOfficialMediaSegments 把附件拆成消息段，紧跟正文段之后。官方事件的富媒体全在
+// attachments 里、content 只剩文字；不拆成消息段，这些媒体不会进入后续链路。
 //
-// 自家表情也走这里：content 是空名的 <faceType=…> 标签（正文只剩 [表情] 占位），
-// 图案本体就是这个附件，所以入站不会被当成纯文字消息。
-func qqOfficialImageSegments(attachments []qqOfficialAttachment) []MessageSegment {
+// 图片段走现有的识图与图片描述流程；视频段走抽帧；语音段带上平台自带的
+// asr_refer_text 转写（有转写时不必再跑本地语音识别）；其余（裸值 file，md/zip/mp3
+// 这类）落成文件段，文件名和大小留给文件解析插件。
+//
+// 自家表情也走图片段这条路：content 是空名的 <faceType=…> 标签（正文只剩 [表情]
+// 占位），图案本体就是附件图，所以入站不会被当成纯文字消息。
+func qqOfficialMediaSegments(attachments []qqOfficialAttachment) []MessageSegment {
 	var segments []MessageSegment
 	for _, attachment := range attachments {
-		if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(attachment.ContentType)), "image") {
+		mediaURL := qqOfficialAttachmentURL(attachment.URL)
+		if mediaURL == "" {
 			continue
 		}
-		imageURL := qqOfficialAttachmentURL(attachment.URL)
-		if imageURL == "" {
-			continue
+		switch qqOfficialAttachmentKind(attachment) {
+		case "image":
+			segments = append(segments, MessageSegment{Type: "image", Data: map[string]string{"url": mediaURL, "file": mediaURL}})
+		case "video":
+			segments = append(segments, MessageSegment{Type: "video", Data: map[string]string{"url": mediaURL, "file": attachment.Filename}})
+		case "record":
+			data := map[string]string{"url": mediaURL, "file": attachment.Filename}
+			if transcript := strings.TrimSpace(attachment.AsrReferText); transcript != "" {
+				data[voiceSTTTranscriptKey] = transcript
+			}
+			segments = append(segments, MessageSegment{Type: "record", Data: data})
+		default:
+			data := map[string]string{"url": mediaURL, "file": mediaURL, "name": attachment.Filename}
+			if attachment.Size > 0 {
+				data["size"] = strconv.FormatInt(attachment.Size, 10)
+			}
+			segments = append(segments, MessageSegment{Type: "file", Data: data})
 		}
-		segments = append(segments, MessageSegment{Type: "image", Data: map[string]string{"url": imageURL, "file": imageURL}})
 	}
 	return segments
+}
+
+// qqOfficialAttachmentKind 把附件归到统一消息段的那一类。
+//
+// 官方文档写的是 MIME，实际语音是裸值 voice、文件是裸值 file；视频是标准
+// video/mp4。图片仍按 image 前缀放行（此前只处理这一类，行为保持不变）。
+func qqOfficialAttachmentKind(attachment qqOfficialAttachment) string {
+	contentType := strings.ToLower(strings.TrimSpace(attachment.ContentType))
+	switch {
+	case strings.HasPrefix(contentType, "image"):
+		return "image"
+	case strings.HasPrefix(contentType, "video"):
+		return "video"
+	case contentType == "voice" || strings.HasPrefix(contentType, "audio"):
+		return "record"
+	default:
+		return "file"
+	}
 }
 
 // qqOfficialAttachmentURL 规范化附件地址：防守一下。实测都是 https
@@ -960,7 +1047,7 @@ func qqOfficialEventFromDispatch(eventType string, data json.RawMessage, selfID 
 	}
 
 	segments := platformTextSegments(text, quoted)
-	segments = append(segments, qqOfficialImageSegments(msg.Attachments)...)
+	segments = append(segments, qqOfficialMediaSegments(msg.Attachments)...)
 	event := MessageEvent{
 		Time:       platformEventTime(msg.Timestamp),
 		SelfID:     selfID,

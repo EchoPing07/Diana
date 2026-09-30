@@ -399,6 +399,9 @@ var permanentSendRejectionMarkers = []string{
 	"40034105",
 	"40034102",
 	"主动消息失败",
+	// QQ 官方机器人：被动回复额度耗尽（40034128）。额度不足时重发同一条只会再次
+	// 被拒，退避重试不会改变结果。
+	"40034128",
 }
 
 // isPermanentSendRejection 判断这次发送失败是不是重试也不可能成功。

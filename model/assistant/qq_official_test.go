@@ -317,7 +317,8 @@ func TestQQOfficialSelfMadeStickerKeepsImageBesidePlaceholder(t *testing.T) {
 	}
 }
 
-// 图片全在 attachments 里、content 只剩文字；不拆成图片段，群友发的图就整个丢了。
+// 图片全在 attachments 里、content 只剩文字；不拆成对应消息段，这些媒体不会进入
+// 后续链路。视频、语音、文件附件同样走这条路（各自的真实事件体见后面几个用例）。
 func TestQQOfficialEventFromDispatchAppendsImageAttachments(t *testing.T) {
 	data := json.RawMessage(`{
 	  "id":"msg-9","content":"看这张","group_openid":"grp-1",
@@ -336,13 +337,20 @@ func TestQQOfficialEventFromDispatchAppendsImageAttachments(t *testing.T) {
 		t.Fatalf("text = %q, want the plain content", event.RawMessage)
 	}
 	var images []MessageSegment
+	videos := 0
 	for _, segment := range event.Segments {
-		if segment.Type == "image" {
+		switch segment.Type {
+		case "image":
 			images = append(images, segment)
+		case "video":
+			videos++
 		}
 	}
 	if len(images) != 2 {
 		t.Fatalf("image segments = %+v, want the two image attachments", event.Segments)
+	}
+	if videos != 1 {
+		t.Fatalf("video segments = %d, want the video attachment kept", videos)
 	}
 	if images[0].Data["url"] != "https://grouppro.grouppro.qq.com/a.jpg" {
 		t.Fatalf("first image url = %q", images[0].Data["url"])
@@ -351,9 +359,9 @@ func TestQQOfficialEventFromDispatchAppendsImageAttachments(t *testing.T) {
 	if images[1].Data["url"] != "https://grouppro.grouppro.qq.com/c.png" {
 		t.Fatalf("second image url = %q, want the https prefix restored", images[1].Data["url"])
 	}
-	// 正文段在前、图片段紧随其后，和 markdown 拆图同序。
+	// 正文段在前、媒体段紧随其后，和 markdown 拆图同序。
 	if event.Segments[len(event.Segments)-1].Type != "image" {
-		t.Fatalf("segments = %+v, want images after the text segment", event.Segments)
+		t.Fatalf("segments = %+v, want media after the text segment", event.Segments)
 	}
 }
 
@@ -412,5 +420,117 @@ func TestRouteOutgoingToEventQQOfficialCarriesPassiveMessageID(t *testing.T) {
 	other := routeOutgoingToEvent(MessageEvent{Platform: "onebot", Kind: EventKindGroup, GroupID: "g", MessageID: "1"}, OutgoingMessage{Text: "hi"})
 	if other.PassiveReplyMessageID != "" {
 		t.Fatalf("passive id leaked to another platform: %q", other.PassiveReplyMessageID)
+	}
+}
+
+// 视频事件体（私聊）：content 为空，视频信息全在 attachments 里，content_type 是
+// 标准 video/mp4。不拆成视频段时，这条消息在运行时就是空消息。
+func TestQQOfficialEventFromDispatchKeepsVideoAttachment(t *testing.T) {
+	data := json.RawMessage(`{
+	  "id": "msg-12",
+	  "author": {"id": "user-1", "user_openid": "user-1"},
+	  "content": "",
+	  "timestamp": "2023-11-14T22:13:20+00:00",
+	  "message_type": 0,
+	  "attachments": [{
+	    "content_type": "video/mp4",
+	    "filename": "5b324291cc7c9436701d639fc317e6f3.mp4",
+	    "size": 1149350,
+	    "url": "https://multimedia.nt.qq.com.cn/download?appid=1413&format=origin"
+	  }]
+	}`)
+	event, ok := qqOfficialEventFromDispatch("C2C_MESSAGE_CREATE", data, "bot-1")
+	if !ok {
+		t.Fatal("video message was not mapped")
+	}
+	found := false
+	for _, segment := range event.Segments {
+		if segment.Type == "video" {
+			found = true
+			if segment.Data["url"] != "https://multimedia.nt.qq.com.cn/download?appid=1413&format=origin" {
+				t.Fatalf("video url = %q", segment.Data["url"])
+			}
+			if segment.Data["file"] != "5b324291cc7c9436701d639fc317e6f3.mp4" {
+				t.Fatalf("video file = %q, want the attachment filename", segment.Data["file"])
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("segments = %+v, want the video attachment kept", event.Segments)
+	}
+}
+
+// 语音附件的 content_type 是裸值 voice（不是 MIME），且平台已带 asr_refer_text
+// 转写；拆成 record 段并直接采用平台转写，不再跑本地语音识别。
+func TestQQOfficialEventFromDispatchKeepsVoiceAttachmentWithTranscript(t *testing.T) {
+	data := json.RawMessage(`{
+	  "id": "msg-13",
+	  "author": {"id": "member-1", "member_openid": "member-1"},
+	  "content": "",
+	  "group_openid": "grp-1",
+	  "attachments": [{
+	    "content_type": "voice",
+	    "filename": "9a4c0b298d23a98cdff9cf54cb0bde2c.amr",
+	    "size": 4912,
+	    "asr_refer_text": "群聊测试语音。",
+	    "url": "https://multimedia.nt.qq.com.cn/download?appid=1402&fileid=x"
+	  }]
+	}`)
+	event, ok := qqOfficialEventFromDispatch("GROUP_MESSAGE_CREATE", data, "bot-1")
+	if !ok {
+		t.Fatal("voice message was not mapped")
+	}
+	found := false
+	for _, segment := range event.Segments {
+		if segment.Type == "record" {
+			found = true
+			if segment.Data[voiceSTTTranscriptKey] != "群聊测试语音。" {
+				t.Fatalf("transcript = %q, want the platform ASR text", segment.Data[voiceSTTTranscriptKey])
+			}
+			if segment.Data["url"] == "" {
+				t.Fatal("voice url was dropped")
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("segments = %+v, want the voice attachment kept", event.Segments)
+	}
+}
+
+// 文件附件的 content_type 是裸值 file，md / zip / mp3 的取值相同，区分只能靠
+// 文件名扩展名；拆成 file 段交给文件解析插件。
+func TestQQOfficialEventFromDispatchKeepsFileAttachment(t *testing.T) {
+	data := json.RawMessage(`{
+	  "id": "msg-14",
+	  "author": {"id": "user-1", "user_openid": "user-1"},
+	  "content": "",
+	  "attachments": [{
+	    "content_type": "file",
+	    "filename": "笔记.md",
+	    "size": 17,
+	    "url": "https://multimedia.nt.qq.com.cn/download?appid=1408&fileid=y"
+	  }]
+	}`)
+	event, ok := qqOfficialEventFromDispatch("C2C_MESSAGE_CREATE", data, "bot-1")
+	if !ok {
+		t.Fatal("file message was not mapped")
+	}
+	found := false
+	for _, segment := range event.Segments {
+		if segment.Type == "file" {
+			found = true
+			if segment.Data["name"] != "笔记.md" {
+				t.Fatalf("file name = %q", segment.Data["name"])
+			}
+			if segment.Data["size"] != "17" {
+				t.Fatalf("file size = %q, want the attachment size", segment.Data["size"])
+			}
+			if segment.Data["url"] == "" {
+				t.Fatal("file url was dropped")
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("segments = %+v, want the file attachment kept", event.Segments)
 	}
 }
