@@ -401,6 +401,14 @@ var permanentSendRejectionMarkers = []string{
 	"主动消息失败",
 }
 
+// qqOfficialQuotaRejected 判断报错是不是 QQ 官方机器人的 40034128（被动回复时间或
+// 次数超过限制）。额度用完或过期后重发同一条只会再次被拒，退避重试不会改变结果。
+// 这个码只在 QQ 官方渠道的报错里认（带 qq: 发送失败 前缀），不进各平台共用的标记表，
+// 避免别的平台报错里碰巧带同一串数字被误判成永久失败。
+func qqOfficialQuotaRejected(message string) bool {
+	return strings.Contains(message, "qq: 发送失败") && strings.Contains(message, qqQuotaExhaustedErrorCode)
+}
+
 // isPermanentSendRejection 判断这次发送失败是不是重试也不可能成功。
 func isPermanentSendRejection(err error) bool {
 	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -416,6 +424,9 @@ func isPermanentSendRejection(err error) bool {
 		return true
 	}
 	message := strings.ToLower(err.Error())
+	if qqOfficialQuotaRejected(message) {
+		return true
+	}
 	for _, marker := range permanentSendRejectionMarkers {
 		if strings.Contains(message, strings.ToLower(marker)) {
 			return true

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -33,6 +34,13 @@ const (
 	qqOfficialAPIBase       = "https://api.sgroup.qq.com"
 	qqOfficialSandboxAPI    = "https://sandbox.api.sgroup.qq.com"
 	qqOfficialHeartbeatSlop = 5 * time.Second
+
+	// qqDedupErrorCode 是开放平台「消息被去重，请检查请求msgseq」的错误码。同一
+	// msg_id 下连发多条时偶发命中，换一个 msg_seq 重发一次即可通过。
+	qqDedupErrorCode = "40054005"
+
+	// qqQuotaExhaustedErrorCode 是「被动回复时间或次数超过限制」的错误码，重试无益。
+	qqQuotaExhaustedErrorCode = "40034128"
 
 	// qqIntentGroupAndC2C 订阅群聊 @ 消息和单聊消息，这是「QQ 机器人」这个形态
 	// 的主场景；频道相关意图另算，没开通频道能力时订阅了会被网关拒绝。
@@ -433,7 +441,7 @@ func (c *QQOfficialChannel) SendWithResult(ctx context.Context, msg OutgoingMess
 		return nil, fmt.Errorf("qq: 缺少会话标识")
 	}
 	text := platformOutboundText(msg)
-	if text == "" && len(msg.ImageURLs) == 0 {
+	if text == "" && len(msg.ImageURLs) == 0 && len(msg.VideoURLs) == 0 && len(msg.AudioURLs) == 0 {
 		return nil, nil
 	}
 	endpoint := c.apiBase() + "/v2/users/" + target + "/messages"
@@ -465,14 +473,26 @@ func (c *QQOfficialChannel) SendWithResult(ctx context.Context, msg OutgoingMess
 				body["msg_seq"] = c.nextPassiveSeq(replyID)
 			}
 		}
-		raw, err := platformJSONRequest(ctx, client, http.MethodPost, endpoint, map[string]string{
-			"Authorization": auth,
-		}, body)
-		if err != nil {
+		request := func() ([]byte, error) {
+			return platformJSONRequest(ctx, client, http.MethodPost, endpoint, map[string]string{
+				"Authorization": auth,
+			}, body)
+		}
+		raw, err := request()
+		if err != nil && strings.Contains(err.Error(), "http 401") {
 			// token 过期时开放平台返回 401；丢掉缓存让下一次重新换。
-			if strings.Contains(err.Error(), "http 401") {
+			c.tokens.Invalidate()
+		}
+		if err != nil && strings.Contains(err.Error(), qqDedupErrorCode) && replyID != "" && !isGuild {
+			// 40054005「消息被去重」：换一个 msg_seq 重发一次可通过，原样重发
+			// 只会再次被拒。
+			body["msg_seq"] = c.nextPassiveSeq(replyID)
+			raw, err = request()
+			if err != nil && strings.Contains(err.Error(), "http 401") {
 				c.tokens.Invalidate()
 			}
+		}
+		if err != nil {
 			return "", fmt.Errorf("qq: 发送失败: %w", err)
 		}
 		var envelope struct {
@@ -502,25 +522,54 @@ func (c *QQOfficialChannel) SendWithResult(ctx context.Context, msg OutgoingMess
 		}
 		firstID = id
 	}
-	if len(msg.ImageURLs) > 0 && isGuild {
-		return nil, fmt.Errorf("qq: 频道消息暂不支持发送图片")
+	if isGuild && (len(msg.ImageURLs) > 0 || len(msg.VideoURLs) > 0 || len(msg.AudioURLs) > 0) {
+		return nil, fmt.Errorf("qq: 频道消息暂不支持发送富媒体")
 	}
 	prefix := c.apiBase() + "/v2/users/" + target
 	if isGroup {
 		prefix = c.apiBase() + "/v2/groups/" + target
 	}
+	// sendMedia 上传一个媒体并以 msg_type 7 的富媒体消息发出。图片、视频、语音
+	// 共用同一条分片上传链路，差别只在 file_type。
+	sendMedia := func(source string, fileType int, maxBytes int64) (string, error) {
+		fileInfo, err := c.qqUploadMedia(ctx, auth, prefix, source, fileType, maxBytes)
+		if err != nil {
+			return "", err
+		}
+		return post(map[string]any{
+			"msg_type": 7,
+			"media":    map[string]any{"file_info": fileInfo},
+		})
+	}
 	for _, source := range msg.ImageURLs {
 		if strings.TrimSpace(source) == "" {
 			continue
 		}
-		fileInfo, err := c.qqUploadImage(ctx, auth, prefix, source)
+		id, err := sendMedia(source, qqFileTypeImage, qqMaxImageBytes)
 		if err != nil {
 			return nil, err
 		}
-		id, err := post(map[string]any{
-			"msg_type": 7,
-			"media":    map[string]any{"file_info": fileInfo},
-		})
+		if firstID == "" {
+			firstID = id
+		}
+	}
+	for _, source := range msg.VideoURLs {
+		if strings.TrimSpace(source) == "" {
+			continue
+		}
+		id, err := sendMedia(source, qqFileTypeVideo, qqMaxVideoBytes)
+		if err != nil {
+			return nil, err
+		}
+		if firstID == "" {
+			firstID = id
+		}
+	}
+	for _, source := range msg.AudioURLs {
+		if strings.TrimSpace(source) == "" {
+			continue
+		}
+		id, err := sendMedia(source, qqFileTypeAudio, qqMaxAudioBytes)
 		if err != nil {
 			return nil, err
 		}
@@ -840,10 +889,16 @@ func stripQQBotMentionTokens(text string, mentions []qqOfficialMention, selfID s
 
 // qqOfficialAttachment 是消息附带的一条富媒体附件。官方只给元信息和下载地址，
 // 图片、语音、视频、文件都靠 content_type 区分。
+//
+// content_type 不全是 MIME：语音是裸值 voice（附带 asr_refer_text 平台转写和
+// voice_wav_url），文件是裸值 file（md / zip / mp3 的取值相同，区分只能靠 filename
+// 扩展名）。size 用于文件解析决定是否嗅探，其余字段不使用就不声明。
 type qqOfficialAttachment struct {
-	ContentType string `json:"content_type"`
-	Filename    string `json:"filename"`
-	URL         string `json:"url"`
+	ContentType  string `json:"content_type"`
+	Filename     string `json:"filename"`
+	URL          string `json:"url"`
+	Size         int64  `json:"size"`
+	AsrReferText string `json:"asr_refer_text"`
 }
 
 var (
@@ -862,7 +917,7 @@ var (
 // ext）退回 [表情]，至少让模型知道这里有个表情。
 //
 // 表情图不在这里：官方对表情商城这类只给名字、不给图，自家表情则是空名标签配一张
-// 附件图，图案由 qqOfficialImageSegments 单独拆成图片段，这个占位不代替它。
+// 附件图，图案由 qqOfficialMediaSegments 单独拆成图片段，这个占位不代替它。
 func qqOfficialFaceText(content string) string {
 	if !strings.Contains(content, "<faceType") {
 		return content
@@ -894,25 +949,60 @@ func qqOfficialFaceTagName(tag string) string {
 	return strings.TrimSpace(payload.Text)
 }
 
-// qqOfficialImageSegments 把图片附件拆成图片段，紧跟正文段之后。官方事件的富媒体
-// 全在 attachments 里、content 只剩文字，不拆出来群友发的图就整个丢了；拆出来后
-// 和 markdown 拆图一样走现有的识图与图片描述流程。
+// qqOfficialMediaSegments 把附件拆成消息段，紧跟正文段之后。官方事件的富媒体全在
+// attachments 里、content 只剩文字；不拆成消息段，这些媒体不会进入后续链路。
 //
-// 自家表情也走这里：content 是空名的 <faceType=…> 标签（正文只剩 [表情] 占位），
-// 图案本体就是这个附件，所以入站不会被当成纯文字消息。
-func qqOfficialImageSegments(attachments []qqOfficialAttachment) []MessageSegment {
+// 图片段走现有的识图与图片描述流程；视频段走抽帧；语音段带上平台自带的
+// asr_refer_text 转写（有转写时不必再跑本地语音识别）；其余（裸值 file，md/zip/mp3
+// 这类）落成文件段，文件名和大小留给文件解析插件。
+//
+// 自家表情也走图片段这条路：content 是空名的 <faceType=…> 标签（正文只剩 [表情]
+// 占位），图案本体就是附件图，所以入站不会被当成纯文字消息。
+func qqOfficialMediaSegments(attachments []qqOfficialAttachment) []MessageSegment {
 	var segments []MessageSegment
 	for _, attachment := range attachments {
-		if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(attachment.ContentType)), "image") {
+		mediaURL := qqOfficialAttachmentURL(attachment.URL)
+		if mediaURL == "" {
 			continue
 		}
-		imageURL := qqOfficialAttachmentURL(attachment.URL)
-		if imageURL == "" {
-			continue
+		switch qqOfficialAttachmentKind(attachment) {
+		case "image":
+			segments = append(segments, MessageSegment{Type: "image", Data: map[string]string{"url": mediaURL, "file": mediaURL}})
+		case "video":
+			segments = append(segments, MessageSegment{Type: "video", Data: map[string]string{"url": mediaURL, "file": attachment.Filename}})
+		case "record":
+			data := map[string]string{"url": mediaURL, "file": attachment.Filename}
+			if transcript := strings.TrimSpace(attachment.AsrReferText); transcript != "" {
+				data[voiceSTTTranscriptKey] = transcript
+			}
+			segments = append(segments, MessageSegment{Type: "record", Data: data})
+		default:
+			data := map[string]string{"url": mediaURL, "file": mediaURL, "name": attachment.Filename}
+			if attachment.Size > 0 {
+				data["size"] = strconv.FormatInt(attachment.Size, 10)
+			}
+			segments = append(segments, MessageSegment{Type: "file", Data: data})
 		}
-		segments = append(segments, MessageSegment{Type: "image", Data: map[string]string{"url": imageURL, "file": imageURL}})
 	}
 	return segments
+}
+
+// qqOfficialAttachmentKind 把附件归到统一消息段的那一类。
+//
+// 官方文档写的是 MIME，实际语音是裸值 voice、文件是裸值 file；视频是标准
+// video/mp4。图片仍按 image 前缀放行（此前只处理这一类，行为保持不变）。
+func qqOfficialAttachmentKind(attachment qqOfficialAttachment) string {
+	contentType := strings.ToLower(strings.TrimSpace(attachment.ContentType))
+	switch {
+	case strings.HasPrefix(contentType, "image"):
+		return "image"
+	case strings.HasPrefix(contentType, "video"):
+		return "video"
+	case contentType == "voice" || strings.HasPrefix(contentType, "audio"):
+		return "record"
+	default:
+		return "file"
+	}
 }
 
 // qqOfficialAttachmentURL 规范化附件地址：防守一下。实测都是 https
@@ -926,6 +1016,155 @@ func qqOfficialAttachmentURL(raw string) string {
 		value = "https://" + strings.TrimPrefix(value, "//")
 	}
 	return value
+}
+
+var (
+	// qqMergedForwardHeaderPattern 匹配合并聊天记录的首行，两种形态：发起人
+	// 昵称（如 [张三的聊天记录]）和 [群聊的聊天记录]。
+	qqMergedForwardHeaderPattern = regexp.MustCompile(`^\[.+的聊天记录\]$`)
+	// qqMergedForwardSeparatorPattern 匹配条目分隔行 === 消息 N ===，序号从 1 递增。
+	qqMergedForwardSeparatorPattern = regexp.MustCompile(`^=== 消息 \d+ ===$`)
+	// qqMergedForwardAttachmentPattern 匹配附件行前缀 [附件N]；序号恒为 1，
+	// 一个条目最多一个附件。
+	qqMergedForwardAttachmentPattern = regexp.MustCompile(`^\[附件\d+\]\s*`)
+	// qqMergedForwardFieldPattern 匹配附件行里的字段标记。值里的冒号（URL 的
+	// https:// 等）不会被误认：标记要求完整的字段名打头。字段分隔符只有半角
+	// 冒号。
+	qqMergedForwardFieldPattern = regexp.MustCompile(`类型:|文件名:|尺寸:|大小:|URL:`)
+)
+
+// qqMergedForwardAttachment 是合并聊天记录附件行拆出来的字段，只留解析要用的。
+type qqMergedForwardAttachment struct {
+	kind string
+	name string
+	url  string
+	// urlStart 是 URL 字段在原行里的起始下标，用来把 URL 从正文里抹掉；-1 表示没有。
+	urlStart int
+}
+
+// qqOfficialMergedForwardMedia 拆出合并聊天记录 content 里的媒体段，并把正文里的
+// 一次性下载地址抹掉。
+//
+// 官方对合并转发不给 msg_elements / attachments，全部内容压成一个 content 字符串，
+// 媒体只以「[附件1] 类型:图片 文件名:… 尺寸:… 大小:… URL:…」的文本行出现。不拆的
+// 话这些媒体进不了识图 / 抽帧链路（同一张图单独发能被识别，放进合并记录则不进入），
+// 而且正文的一半以上是带 rkey 的一次性地址——接话评分按尾部 180 字截断，截到的
+// 整段都是 URL。
+//
+// 带 URL 的附件行换成消息段（图片 / 动图→image，视频→video，语音→record）并从
+// 正文里抹掉 URL，行内留下类型 / 文件名 / 尺寸 / 大小等字段。文件类附件不带 URL
+// （只有文件名和大小），拆不出段就整行留在正文里；未知类型同样不拆。
+// 首行 [某某的聊天记录] 与 === 消息 N === 分隔行同时出现才认定是合并转发，避免把
+// 恰好引用了这个格式的普通长文误拆。
+func qqOfficialMergedForwardMedia(text string) (string, []MessageSegment) {
+	if !qqOfficialLooksLikeMergedForward(text) {
+		return text, nil
+	}
+	lines := strings.Split(text, "\n")
+	var segments []MessageSegment
+	for i, line := range lines {
+		attachment, ok := qqMergedForwardAttachmentFields(line)
+		if !ok {
+			continue
+		}
+		segment, cleaned, handled := qqMergedForwardAttachmentSegment(attachment, line)
+		if !handled {
+			continue
+		}
+		lines[i] = cleaned
+		segments = append(segments, segment)
+	}
+	return strings.Join(lines, "\n"), segments
+}
+
+// qqOfficialLooksLikeMergedForward 按首行标题与条目分隔行判断 content 是不是合并聊天记录。
+func qqOfficialLooksLikeMergedForward(text string) bool {
+	firstLine := text
+	if idx := strings.IndexByte(text, '\n'); idx >= 0 {
+		firstLine = text[:idx]
+	}
+	if !qqMergedForwardHeaderPattern.MatchString(strings.TrimRight(firstLine, "\r")) {
+		return false
+	}
+	for _, line := range strings.Split(text, "\n") {
+		if qqMergedForwardSeparatorPattern.MatchString(strings.TrimRight(line, "\r")) {
+			return true
+		}
+	}
+	return false
+}
+
+// qqMergedForwardAttachmentFields 解出附件行的字段。字段组合随类型有差（文件行没有
+// 尺寸和 URL），统一按字段标记切、不假定顺序；字段序以 类型 → 文件名 打头，
+// 这两个不齐就当作普通文本行，避免误拆。
+func qqMergedForwardAttachmentFields(line string) (qqMergedForwardAttachment, bool) {
+	loc := qqMergedForwardAttachmentPattern.FindStringIndex(line)
+	if loc == nil {
+		return qqMergedForwardAttachment{}, false
+	}
+	region := line[loc[1]:]
+	matches := qqMergedForwardFieldPattern.FindAllStringIndex(region, -1)
+	if len(matches) < 2 ||
+		region[matches[0][0]:matches[0][1]] != "类型:" ||
+		region[matches[1][0]:matches[1][1]] != "文件名:" {
+		return qqMergedForwardAttachment{}, false
+	}
+	attachment := qqMergedForwardAttachment{urlStart: -1}
+	for i, match := range matches {
+		key := region[match[0]:match[1]]
+		end := len(region)
+		if i+1 < len(matches) {
+			end = matches[i+1][0]
+		}
+		value := strings.TrimSpace(region[match[1]:end])
+		switch key {
+		case "类型:":
+			attachment.kind = value
+		case "文件名:":
+			attachment.name = value
+		case "URL:":
+			attachment.url = value
+			attachment.urlStart = loc[1] + match[0]
+		}
+	}
+	if attachment.kind == "" || attachment.name == "" {
+		return qqMergedForwardAttachment{}, false
+	}
+	return attachment, true
+}
+
+// qqMergedForwardAttachmentSegment 把附件行换算成消息段，返回抹掉 URL 后的行；
+// 换不成段时原行原样返回。
+func qqMergedForwardAttachmentSegment(attachment qqMergedForwardAttachment, line string) (MessageSegment, string, bool) {
+	mediaURL := qqOfficialAttachmentURL(attachment.url)
+	if mediaURL == "" {
+		return MessageSegment{}, line, false
+	}
+	switch attachment.kind {
+	case "图片", "动图":
+		return MessageSegment{Type: "image", Data: map[string]string{"url": mediaURL, "file": mediaURL}},
+			qqMergedForwardLineWithoutURL(line, attachment.urlStart), true
+	case "视频":
+		return MessageSegment{Type: "video", Data: map[string]string{"url": mediaURL, "file": attachment.name}},
+			qqMergedForwardLineWithoutURL(line, attachment.urlStart), true
+	case "语音":
+		return MessageSegment{Type: "record", Data: map[string]string{"url": mediaURL, "file": attachment.name}},
+			qqMergedForwardLineWithoutURL(line, attachment.urlStart), true
+	case "文件":
+		// 文件类附件不带 URL；带 URL 时按附件 file 段同样处理，交给文件解析插件。
+		return MessageSegment{Type: "file", Data: map[string]string{"url": mediaURL, "file": mediaURL, "name": attachment.name}},
+			qqMergedForwardLineWithoutURL(line, attachment.urlStart), true
+	default:
+		return MessageSegment{}, line, false
+	}
+}
+
+// qqMergedForwardLineWithoutURL 抹掉附件行里的 URL 字段（含它前面的空白）。
+func qqMergedForwardLineWithoutURL(line string, urlStart int) string {
+	if urlStart < 0 || urlStart >= len(line) {
+		return line
+	}
+	return strings.TrimRight(line[:urlStart], " \t")
 }
 
 // qqOfficialEventFromDispatch 把网关事件映射成统一事件。
@@ -959,8 +1198,12 @@ func qqOfficialEventFromDispatch(eventType string, data json.RawMessage, selfID 
 		}
 	}
 
+	// 合并聊天记录不给 attachments，媒体全压在 content 文本里：拆成消息段，
+	// 同时抹掉正文里的一次性下载地址。
+	text, mergedMedia := qqOfficialMergedForwardMedia(text)
 	segments := platformTextSegments(text, quoted)
-	segments = append(segments, qqOfficialImageSegments(msg.Attachments)...)
+	segments = append(segments, mergedMedia...)
+	segments = append(segments, qqOfficialMediaSegments(msg.Attachments)...)
 	event := MessageEvent{
 		Time:       platformEventTime(msg.Timestamp),
 		SelfID:     selfID,

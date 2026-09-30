@@ -725,6 +725,7 @@ func TestOutboundFailureClassification(t *testing.T) {
 		{"numeric segment field", &oneBotActionError{retCode: 200, message: `numeric message segment field must contain only an integer, received "im_current_user_1"`}, true, false},
 		{"video must be alone", errors.New(`message element "video" must be the only segment in a message`), true, false},
 		{"local invalid group id", fmt.Errorf("diana: send failed after 1 attempts: %w", errors.New(`diana: invalid group id "abc"`)), true, false},
+		{"qq official passive quota exhausted", errors.New(`diana: send failed after 1 attempts: qq: 发送失败: http 400: {"message":"回复消息失败，被动回复时间或者次数超过限制","code":40034128}`), true, false},
 		{"qq risk control", &oneBotActionError{retCode: 200, message: "发送消息失败 result=120"}, false, false},
 		{"generic retcode", &oneBotActionError{retCode: 200, message: "onebot api failed: status=failed retcode=200"}, false, false},
 		{"not connected", newChannelNotConnectedError("diana: onebot reverse websocket is not connected"), false, false},
