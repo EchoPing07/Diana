@@ -162,7 +162,9 @@ var errOutboundPermanentRejection = errors.New("diana: outbound message is inval
 // 的 at 别名进了数字字段）和「message element "video" must be the only segment
 // in a message」（9/24）。
 //
-// QQ 侧的拒收（比如 result=120，可能是禁言或风控）不在这里，仍走原来的退避。
+// QQ 侧的拒收（比如 result=120，可能是禁言或风控）不在这里，仍走原来的退避；例外
+// 是 QQ 官方的 40034128（被动回复额度耗尽），它和上面那些一样重试不会成功，由
+// qqOfficialQuotaRejected 只在 QQ 官方渠道的报错里认，未归入会在发送重试循环里空跑三轮退避。
 var permanentOutboundRejectionMarkers = []string{
 	"must contain only an integer",
 	"must be the only segment",
@@ -192,6 +194,9 @@ func isPermanentOutboundRejection(err error) bool {
 		}
 	}
 	message := strings.ToLower(err.Error())
+	if qqOfficialQuotaRejected(message) {
+		return true
+	}
 	for _, marker := range permanentOutboundRejectionMarkers {
 		if strings.Contains(message, marker) {
 			return true

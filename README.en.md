@@ -158,13 +158,13 @@ Every enabled bot profile is online at the same time, and replies always go back
 | **Feishu** | App ID + App Secret + Verification Token (plus Encrypt Key if encrypted push is on) | Platform callback → Diana, **public address required** |
 | **WeCom** | Corp ID + AgentId + Secret + callback Token/EncodingAESKey | Platform callback → Diana, **public address required** |
 
-For Feishu and WeCom, the Bots page shows the exact callback URLs to paste into the platform's admin console. Platform-specific quirks (e.g. QQ Official Bot only receives @-mentions, voice playback is OneBot-only) are covered in the [configuration docs](https://suink.github.io/Diana/configuration.html).
+For Feishu and WeCom, the Bots page shows the exact callback URLs to paste into the platform's admin console. Platform-specific quirks (e.g. QQ Official Bot only receives @-mentions by default; the group owner has to change the bot's group message scope) are covered in the [configuration docs](https://suink.github.io/Diana/configuration.html).
 
 ## Built-in abilities
 
 These ship with the binary — toggle and configure them in the console, no plugin installation needed:
 
-- **Proactive chatting** — it decides on its own when to chime in and when to stay quiet, no @-mention required; every reply-or-not decision is logged in the event center (requires the platform to deliver all group messages — QQ Official Bot and DingTalk only push @-mentions, so it doesn't apply there).
+- **Proactive chatting** — it decides on its own when to chime in and when to stay quiet, no @-mention required; every reply-or-not decision is logged in the event center (requires the platform to deliver all group messages — on QQ Official Bot the group owner has to widen the bot's group message scope first, while DingTalk only pushes @-mentions so it never applies there).
 - **Web search** — time-sensitive questions get researched before answering; Exa first, Tavily as fallback.
 - **Link parsing** — videos and images from Bilibili / YouTube / X / Xiaohongshu / Douyin are resolved and posted right into the chat.
 - **File parsing** — group files, PDF, Office, and EPUB content is extracted and handed to the model.

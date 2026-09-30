@@ -127,3 +127,19 @@ func TestIsPermanentSendRejectionQQOfficialProactiveDenied(t *testing.T) {
 		t.Fatal("QQ official 40034105 must not be retried")
 	}
 }
+
+// 40034128 是被动回复额度耗尽，重发同一条会再次被拒。
+func TestIsPermanentSendRejectionQQOfficialQuotaExhausted(t *testing.T) {
+	exhausted := &outboundSendError{Cause: errors.New(`diana: send failed after 1 attempts: qq: 发送失败: http 400: {"message":"回复消息失败，被动回复时间或者次数超过限制","code":40034128}`)}
+	if !isPermanentSendRejection(exhausted) {
+		t.Fatal("QQ official 40034128 must not be retried")
+	}
+}
+
+// 40034128 只在 QQ 官方渠道的报错里认，别的平台碰巧带同一串数字不受影响。
+func TestQQOfficialQuotaRejectionScopedToQQ(t *testing.T) {
+	other := &outboundSendError{Cause: errors.New(`diana: send failed after 1 attempts: telegram: 发送失败: code 40034128`)}
+	if isPermanentSendRejection(other) || isPermanentOutboundRejection(other) {
+		t.Fatal("40034128 outside the QQ official channel must not be treated as permanent")
+	}
+}
