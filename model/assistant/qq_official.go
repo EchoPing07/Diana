@@ -1015,6 +1015,155 @@ func qqOfficialAttachmentURL(raw string) string {
 	return value
 }
 
+var (
+	// qqMergedForwardHeaderPattern 匹配合并聊天记录的首行，两种形态：发起人
+	// 昵称（如 [张三的聊天记录]）和 [群聊的聊天记录]。
+	qqMergedForwardHeaderPattern = regexp.MustCompile(`^\[.+的聊天记录\]$`)
+	// qqMergedForwardSeparatorPattern 匹配条目分隔行 === 消息 N ===，序号从 1 递增。
+	qqMergedForwardSeparatorPattern = regexp.MustCompile(`^=== 消息 \d+ ===$`)
+	// qqMergedForwardAttachmentPattern 匹配附件行前缀 [附件N]；序号恒为 1，
+	// 一个条目最多一个附件。
+	qqMergedForwardAttachmentPattern = regexp.MustCompile(`^\[附件\d+\]\s*`)
+	// qqMergedForwardFieldPattern 匹配附件行里的字段标记。值里的冒号（URL 的
+	// https:// 等）不会被误认：标记要求完整的字段名打头。字段分隔符只有半角
+	// 冒号。
+	qqMergedForwardFieldPattern = regexp.MustCompile(`类型:|文件名:|尺寸:|大小:|URL:`)
+)
+
+// qqMergedForwardAttachment 是合并聊天记录附件行拆出来的字段，只留解析要用的。
+type qqMergedForwardAttachment struct {
+	kind string
+	name string
+	url  string
+	// urlStart 是 URL 字段在原行里的起始下标，用来把 URL 从正文里抹掉；-1 表示没有。
+	urlStart int
+}
+
+// qqOfficialMergedForwardMedia 拆出合并聊天记录 content 里的媒体段，并把正文里的
+// 一次性下载地址抹掉。
+//
+// 官方对合并转发不给 msg_elements / attachments，全部内容压成一个 content 字符串，
+// 媒体只以「[附件1] 类型:图片 文件名:… 尺寸:… 大小:… URL:…」的文本行出现。不拆的
+// 话这些媒体进不了识图 / 抽帧链路（同一张图单独发能被识别，放进合并记录则不进入），
+// 而且正文的一半以上是带 rkey 的一次性地址——接话评分按尾部 180 字截断，截到的
+// 整段都是 URL。
+//
+// 带 URL 的附件行换成消息段（图片 / 动图→image，视频→video，语音→record）并从
+// 正文里抹掉 URL，行内留下类型 / 文件名 / 尺寸 / 大小等字段。文件类附件不带 URL
+// （只有文件名和大小），拆不出段就整行留在正文里；未知类型同样不拆。
+// 首行 [某某的聊天记录] 与 === 消息 N === 分隔行同时出现才认定是合并转发，避免把
+// 恰好引用了这个格式的普通长文误拆。
+func qqOfficialMergedForwardMedia(text string) (string, []MessageSegment) {
+	if !qqOfficialLooksLikeMergedForward(text) {
+		return text, nil
+	}
+	lines := strings.Split(text, "\n")
+	var segments []MessageSegment
+	for i, line := range lines {
+		attachment, ok := qqMergedForwardAttachmentFields(line)
+		if !ok {
+			continue
+		}
+		segment, cleaned, handled := qqMergedForwardAttachmentSegment(attachment, line)
+		if !handled {
+			continue
+		}
+		lines[i] = cleaned
+		segments = append(segments, segment)
+	}
+	return strings.Join(lines, "\n"), segments
+}
+
+// qqOfficialLooksLikeMergedForward 按首行标题与条目分隔行判断 content 是不是合并聊天记录。
+func qqOfficialLooksLikeMergedForward(text string) bool {
+	firstLine := text
+	if idx := strings.IndexByte(text, '\n'); idx >= 0 {
+		firstLine = text[:idx]
+	}
+	if !qqMergedForwardHeaderPattern.MatchString(strings.TrimRight(firstLine, "\r")) {
+		return false
+	}
+	for _, line := range strings.Split(text, "\n") {
+		if qqMergedForwardSeparatorPattern.MatchString(strings.TrimRight(line, "\r")) {
+			return true
+		}
+	}
+	return false
+}
+
+// qqMergedForwardAttachmentFields 解出附件行的字段。字段组合随类型有差（文件行没有
+// 尺寸和 URL），统一按字段标记切、不假定顺序；字段序以 类型 → 文件名 打头，
+// 这两个不齐就当作普通文本行，避免误拆。
+func qqMergedForwardAttachmentFields(line string) (qqMergedForwardAttachment, bool) {
+	loc := qqMergedForwardAttachmentPattern.FindStringIndex(line)
+	if loc == nil {
+		return qqMergedForwardAttachment{}, false
+	}
+	region := line[loc[1]:]
+	matches := qqMergedForwardFieldPattern.FindAllStringIndex(region, -1)
+	if len(matches) < 2 ||
+		region[matches[0][0]:matches[0][1]] != "类型:" ||
+		region[matches[1][0]:matches[1][1]] != "文件名:" {
+		return qqMergedForwardAttachment{}, false
+	}
+	attachment := qqMergedForwardAttachment{urlStart: -1}
+	for i, match := range matches {
+		key := region[match[0]:match[1]]
+		end := len(region)
+		if i+1 < len(matches) {
+			end = matches[i+1][0]
+		}
+		value := strings.TrimSpace(region[match[1]:end])
+		switch key {
+		case "类型:":
+			attachment.kind = value
+		case "文件名:":
+			attachment.name = value
+		case "URL:":
+			attachment.url = value
+			attachment.urlStart = loc[1] + match[0]
+		}
+	}
+	if attachment.kind == "" || attachment.name == "" {
+		return qqMergedForwardAttachment{}, false
+	}
+	return attachment, true
+}
+
+// qqMergedForwardAttachmentSegment 把附件行换算成消息段，返回抹掉 URL 后的行；
+// 换不成段时原行原样返回。
+func qqMergedForwardAttachmentSegment(attachment qqMergedForwardAttachment, line string) (MessageSegment, string, bool) {
+	mediaURL := qqOfficialAttachmentURL(attachment.url)
+	if mediaURL == "" {
+		return MessageSegment{}, line, false
+	}
+	switch attachment.kind {
+	case "图片", "动图":
+		return MessageSegment{Type: "image", Data: map[string]string{"url": mediaURL, "file": mediaURL}},
+			qqMergedForwardLineWithoutURL(line, attachment.urlStart), true
+	case "视频":
+		return MessageSegment{Type: "video", Data: map[string]string{"url": mediaURL, "file": attachment.name}},
+			qqMergedForwardLineWithoutURL(line, attachment.urlStart), true
+	case "语音":
+		return MessageSegment{Type: "record", Data: map[string]string{"url": mediaURL, "file": attachment.name}},
+			qqMergedForwardLineWithoutURL(line, attachment.urlStart), true
+	case "文件":
+		// 文件类附件不带 URL；带 URL 时按附件 file 段同样处理，交给文件解析插件。
+		return MessageSegment{Type: "file", Data: map[string]string{"url": mediaURL, "file": mediaURL, "name": attachment.name}},
+			qqMergedForwardLineWithoutURL(line, attachment.urlStart), true
+	default:
+		return MessageSegment{}, line, false
+	}
+}
+
+// qqMergedForwardLineWithoutURL 抹掉附件行里的 URL 字段（含它前面的空白）。
+func qqMergedForwardLineWithoutURL(line string, urlStart int) string {
+	if urlStart < 0 || urlStart >= len(line) {
+		return line
+	}
+	return strings.TrimRight(line[:urlStart], " \t")
+}
+
 // qqOfficialEventFromDispatch 把网关事件映射成统一事件。
 //
 // 语义对照：
@@ -1046,7 +1195,11 @@ func qqOfficialEventFromDispatch(eventType string, data json.RawMessage, selfID 
 		}
 	}
 
+	// 合并聊天记录不给 attachments，媒体全压在 content 文本里：拆成消息段，
+	// 同时抹掉正文里的一次性下载地址。
+	text, mergedMedia := qqOfficialMergedForwardMedia(text)
 	segments := platformTextSegments(text, quoted)
+	segments = append(segments, mergedMedia...)
 	segments = append(segments, qqOfficialMediaSegments(msg.Attachments)...)
 	event := MessageEvent{
 		Time:       platformEventTime(msg.Timestamp),

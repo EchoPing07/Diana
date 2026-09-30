@@ -6,6 +6,7 @@ package assistant
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -532,5 +533,242 @@ func TestQQOfficialEventFromDispatchKeepsFileAttachment(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("segments = %+v, want the file attachment kept", event.Segments)
+	}
+}
+
+// 合并聊天记录没有 attachments，媒体只以「[附件1] 类型:… URL:…」的文本行压在
+// content 里；不拆出来这些媒体不会进入识图/抽帧链路。图片/动图拆成 image 段、
+// 视频拆成 video 段，正文里的 URL 抹掉、留下可读字段；文件类附件没有 URL，
+// 拆不出段就整行保留。
+func TestQQOfficialEventFromDispatchMergedForwardMediaSegments(t *testing.T) {
+	imageURL := "https://multimedia.nt.qq.com.cn/download?appid=1407&fileid=E0EADC9617A004546F5531A7A80AE50A&rkey=CAEStest1&spec=0"
+	gifURL := "https://multimedia.nt.qq.com.cn/download?appid=1407&fileid=9B96163CD7A3D14F282544DB1C663769&rkey=CAEStest2&spec=0"
+	secondImageURL := "https://multimedia.nt.qq.com.cn/download?appid=1407&fileid=3724E7E487F6B0748FCEE7526678987C&rkey=CAEStest3&spec=0"
+	videoURL := "https://multimedia.nt.qq.com.cn/download?appid=1415&format=origin&orgfmt=t265&spec=0&rkey=CAEStest4"
+	content := strings.Join([]string{
+		"[张三的聊天记录]",
+		"=== 消息 1 ===",
+		"[消息内容] 合并信息测试",
+		"[发送者] 张三",
+		"",
+		"=== 消息 2 ===",
+		"[消息内容] [吃芒果]",
+		"[发送者] 张三",
+		"",
+		"=== 消息 3 ===",
+		"[消息内容] [表情]",
+		"[发送者] 张三",
+		"[附件1] 类型:图片 文件名:E0EADC9617A004546F5531A7A80AE50A.jpg 尺寸:720x720 大小:77.4KB URL:" + imageURL,
+		"",
+		"=== 消息 4 ===",
+		"[消息内容] [表情]",
+		"[发送者] 张三",
+		"[附件1] 类型:动图 文件名:9B96163CD7A3D14F282544DB1C663769.gif 尺寸:300x327 大小:4.6MB URL:" + gifURL,
+		"",
+		"=== 消息 5 ===",
+		"[消息内容] 以上分别为普通表情，自制静态表情，自制动态git表情",
+		"[发送者] 张三",
+		"",
+		"=== 消息 6 ===",
+		"[发送者] 张三",
+		"[附件1] 类型:图片 文件名:3724E7E487F6B0748FCEE7526678987C.jpg 尺寸:1079x1079 大小:105.2KB URL:" + secondImageURL,
+		"",
+		"=== 消息 7 ===",
+		"[发送者] 张三",
+		"[附件1] 类型:视频 文件名:6ecb7f75c70942ab7e11dcecfa656939.mp4 尺寸:640x1138 大小:753.0KB URL:" + videoURL,
+		"",
+		"=== 消息 8 ===",
+		"[消息内容] 以上为图片，视频",
+		"[发送者] 张三",
+		"",
+		"=== 消息 9 ===",
+		"[发送者] 张三",
+		"[附件1] 类型:文件 文件名:测试.md 大小:17B",
+		"",
+		"=== 消息 10 ===",
+		"[发送者] 张三",
+		"[附件1] 类型:文件 文件名:测试.zip 大小:321B",
+		"",
+		"=== 消息 11 ===",
+		"[发送者] 张三",
+		"[附件1] 类型:文件 文件名:12.31.mp3 大小:4.4MB",
+		"",
+		"=== 消息 12 ===",
+		"[消息内容] 以上为文件测试",
+		"[发送者] 张三",
+	}, "\n")
+	payload, err := json.Marshal(map[string]any{
+		"id":           "msg-15",
+		"content":      content,
+		"group_openid": "grp-1",
+		"author":       map[string]any{"member_openid": "member-1"},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	event, ok := qqOfficialEventFromDispatch("GROUP_MESSAGE_CREATE", payload, "bot-1")
+	if !ok {
+		t.Fatal("merged forward message was not mapped")
+	}
+	var imageURLs []string
+	var videoSegments []MessageSegment
+	for _, segment := range event.Segments {
+		switch segment.Type {
+		case "image":
+			imageURLs = append(imageURLs, segment.Data["url"])
+		case "video":
+			videoSegments = append(videoSegments, segment)
+		}
+	}
+	if len(imageURLs) != 3 || imageURLs[0] != imageURL || imageURLs[1] != gifURL || imageURLs[2] != secondImageURL {
+		t.Fatalf("image urls = %v, want the jpg/gif/jpg attachment urls in order", imageURLs)
+	}
+	if len(videoSegments) != 1 {
+		t.Fatalf("video segments = %d, want the video attachment kept", len(videoSegments))
+	}
+	if videoSegments[0].Data["url"] != videoURL {
+		t.Fatalf("video url = %q", videoSegments[0].Data["url"])
+	}
+	if videoSegments[0].Data["file"] != "6ecb7f75c70942ab7e11dcecfa656939.mp4" {
+		t.Fatalf("video file = %q, want the attachment filename", videoSegments[0].Data["file"])
+	}
+	// 一次性下载地址不能留在正文里：接话评分按尾部 180 字截断，截到 URL 时整段
+	// 都是参数串；识图链路已在消息段里得到地址。
+	if strings.Contains(event.RawMessage, "rkey=") || strings.Contains(event.RawMessage, "multimedia.nt.qq.com.cn") {
+		t.Fatalf("raw message still carries download urls: %q", event.RawMessage)
+	}
+	// 抹掉 URL 的附件行保留类型/文件名/尺寸/大小这些可读字段；文件行没有 URL，
+	// 原样保留。
+	for _, want := range []string{
+		"[附件1] 类型:图片 文件名:E0EADC9617A004546F5531A7A80AE50A.jpg 尺寸:720x720 大小:77.4KB",
+		"[附件1] 类型:视频 文件名:6ecb7f75c70942ab7e11dcecfa656939.mp4 尺寸:640x1138 大小:753.0KB",
+		"[附件1] 类型:文件 文件名:测试.md 大小:17B",
+		"[附件1] 类型:文件 文件名:12.31.mp3 大小:4.4MB",
+	} {
+		if !strings.Contains(event.RawMessage, want) {
+			t.Fatalf("raw message lost the readable attachment line %q: %q", want, event.RawMessage)
+		}
+	}
+	// 正文段即抹掉 URL 后的正文，结构行（标题、分隔、发送者）原样保留。
+	var textSegment string
+	for _, segment := range event.Segments {
+		if segment.Type == "text" {
+			textSegment = segment.Data["text"]
+		}
+	}
+	if textSegment != event.RawMessage {
+		t.Fatalf("text segment = %q, want the cleaned raw message", textSegment)
+	}
+	if !strings.Contains(event.RawMessage, "[张三的聊天记录]") || !strings.Contains(event.RawMessage, "=== 消息 12 ===") {
+		t.Fatalf("raw message lost the merged forward structure: %q", event.RawMessage)
+	}
+}
+
+// 首行 [某某的聊天记录] 与 === 消息 N === 分隔行同时出现才认定是合并转发：只带
+// 分隔行的普通长文、只有标题没有条目的文本都不能被误拆。另一种真实形态的标题是
+// [群聊的聊天记录]，[消息内容] 行可以整行缺失，且可能还是未解码的表情标签。
+func TestQQOfficialMergedForwardMediaRequiresHeaderAndSeparator(t *testing.T) {
+	cases := []struct {
+		name string
+		text string
+	}{
+		{
+			name: "separator without header",
+			text: "记录一下\n=== 消息 1 ===\n[消息内容] 普通文本\n[发送者] 某人\n[附件1] 类型:图片 文件名:a.jpg 尺寸:1x1 大小:1KB URL:https://multimedia.nt.qq.com.cn/download?fileid=a&rkey=x",
+		},
+		{
+			name: "header without separator",
+			text: "[张三的聊天记录]\n有人直接打字引用了这个标题，内容不是转发",
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			text, segments := qqOfficialMergedForwardMedia(testCase.text)
+			if text != testCase.text || len(segments) != 0 {
+				t.Fatalf("text = %q segments = %v, want the plain text untouched", text, segments)
+			}
+		})
+	}
+}
+
+// 另一形态：标题是 [群聊的聊天记录]，部分条目没有 [消息内容] 行、
+// 有的是未解码的表情标签；解析发生在表情转换之后，媒体仍能拆出。
+func TestQQOfficialMergedForwardMediaHandlesGroupChatRecord(t *testing.T) {
+	content := strings.Join([]string{
+		"[群聊的聊天记录]",
+		"=== 消息 1 ===",
+		"[发送者] 张三",
+		"[附件1] 类型:图片 文件名:4E7D7DC8D07F61AFF8BF284D73EC204C.jpg 尺寸:1254x1254 大小:173.8KB URL:https://multimedia.nt.qq.com.cn/download?appid=1407&fileid=4E7D7DC8&rkey=CAEStest&spec=0",
+		"",
+		"=== 消息 2 ===",
+		"[发送者] 张三",
+		"[附件1] 类型:视频 文件名:1d1d2927a7135c4c40953164db86a34d.mp4 尺寸:640x1138 大小:1.1MB URL:https://multimedia.nt.qq.com.cn/download?appid=1415&format=origin&orgfmt=t265&spec=0&rkey=CAEStest",
+		"",
+		"=== 消息 3 ===",
+		`[消息内容] <faceType=6,faceId="0",ext="eyJ0ZXh0IjoiIn0=">`,
+		"[发送者] 张三",
+		"[附件1] 类型:图片 文件名:E0EADC9617A004546F5531A7A80AE50A.jpg 尺寸:720x720 大小:77.4KB URL:https://multimedia.nt.qq.com.cn/download?appid=1407&fileid=E0EADC96&rkey=CAEStest&spec=0",
+		"",
+		"=== 消息 4 ===",
+		"[消息内容] [有点饿了]",
+		"[发送者] 张三",
+		"",
+		"=== 消息 5 ===",
+		`[消息内容] <faceType=6,faceId="0",ext="eyJ0ZXh0IjoiIn0=">`,
+		"[发送者] 张三",
+		"[附件1] 类型:动图 文件名:9B96163CD7A3D14F282544DB1C663769.gif 尺寸:300x327 大小:4.6MB URL:https://multimedia.nt.qq.com.cn/download?appid=1407&fileid=9B96163C&rkey=CAEStest&spec=0",
+	}, "\n")
+	payload, err := json.Marshal(map[string]any{
+		"id":           "msg-16",
+		"content":      content,
+		"group_openid": "grp-1",
+		"author":       map[string]any{"member_openid": "member-1"},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	event, ok := qqOfficialEventFromDispatch("GROUP_MESSAGE_CREATE", payload, "bot-1")
+	if !ok {
+		t.Fatal("merged forward message was not mapped")
+	}
+	images, videos := 0, 0
+	for _, segment := range event.Segments {
+		switch segment.Type {
+		case "image":
+			images++
+		case "video":
+			videos++
+		}
+	}
+	if images != 3 || videos != 1 {
+		t.Fatalf("images = %d videos = %d, want 3 images and 1 video from the record", images, videos)
+	}
+	// 表情标签已翻成 [表情] 占位，一次性地址也已抹掉。
+	if strings.Contains(event.RawMessage, "<faceType") {
+		t.Fatalf("raw message kept the face tag: %q", event.RawMessage)
+	}
+	if strings.Contains(event.RawMessage, "multimedia.nt.qq.com.cn") {
+		t.Fatalf("raw message kept download urls: %q", event.RawMessage)
+	}
+	if !strings.Contains(event.RawMessage, "[消息内容] [表情]") {
+		t.Fatalf("raw message lost the face placeholder: %q", event.RawMessage)
+	}
+}
+
+// 未观测到的附件类型（如链接）不拆段，整行连同 URL 原样留在正文里，
+// 保留信息。
+func TestQQOfficialMergedForwardMediaKeepsUnknownAttachmentKind(t *testing.T) {
+	text := strings.Join([]string{
+		"[群聊的聊天记录]",
+		"=== 消息 1 ===",
+		"[发送者] 张三",
+		"[附件1] 类型:链接 文件名:分享.html 大小:1KB URL:https://example.com/share",
+	}, "\n")
+	cleaned, segments := qqOfficialMergedForwardMedia(text)
+	if len(segments) != 0 {
+		t.Fatalf("segments = %+v, want no segments for an unknown kind", segments)
+	}
+	if cleaned != text {
+		t.Fatalf("cleaned = %q, want the line kept verbatim", cleaned)
 	}
 }
