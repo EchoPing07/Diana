@@ -39,6 +39,9 @@ const (
 	// msg_id 下连发多条时偶发命中，换一个 msg_seq 重发一次即可通过。
 	qqDedupErrorCode = "40054005"
 
+	// qqQuotaExhaustedErrorCode 是「被动回复时间或次数超过限制」的错误码，重试无益。
+	qqQuotaExhaustedErrorCode = "40034128"
+
 	// qqIntentGroupAndC2C 订阅群聊 @ 消息和单聊消息，这是「QQ 机器人」这个形态
 	// 的主场景；频道相关意图另算，没开通频道能力时订阅了会被网关拒绝。
 	qqIntentGroupAndC2C = 1 << 25
