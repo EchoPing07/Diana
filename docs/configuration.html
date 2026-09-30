@@ -58,7 +58,8 @@
             <div><dt>凭据</dt><dd>开放平台的 AppID 与 AppSecret</dd></div>
             <div><dt>连接</dt><dd>换取 access token 后连网关 WebSocket</dd></div>
             <div><dt>沙箱</dt><dd>机器人未上架时可勾选沙箱环境联调</dd></div>
-            <div><dt>范围</dt><dd>只能收到 @ 了机器人的群消息</dd></div>
+            <div><dt>能力</dt><dd>收：文字、图片、视频、语音（平台自动转写）、文件，合并聊天记录里的媒体同样拆出。发：文字、图片、视频、语音</dd></div>
+            <div><dt>范围</dt><dd>群聊默认只推送 @ 了机器人的消息，群主可在群聊设置里改成获取群内全部消息</dd></div>
           </dl></article>
           <article><h3>钉钉</h3><dl>
             <div><dt>凭据</dt><dd>应用的 Client ID 与 Client Secret</dd></div>
@@ -106,7 +107,7 @@ https://HOST/api/channels/wecom/callback</code></pre>
           <li><strong>群等级门槛只对 OneBot v11 生效</strong>。其余平台没有群等级概念，准入设置里不显示该项。</li>
           <li><strong>语音消息和 @某人</strong>依赖 OneBot 的 CQ 码，其他平台上自然降级：正文照发，但不会 @ 到人。</li>
           <li><strong>本地媒体</strong>在 OneBot 侧由适配器拉取 Diana 的 <code>/media/resolver</code> 地址；Telegram 拉不到本机地址，改为直接 multipart 上传。</li>
-          <li><strong>QQ 官方机器人和钉钉只会收到点名消息</strong>。平台侧只推送 @ 了机器人的群消息，拿不到全部群消息，因此自然插话、群聊氛围感知这类功能在这两个平台上不会触发。</li>
+          <li><strong>QQ 官方机器人默认只推送 @ 了机器人的群消息</strong>，群主在群聊设置里把「机器人可获取的群聊消息范围」改成「获取群内全部消息」后，自然插话、群聊氛围感知即可用。钉钉只推送 @ 了机器人的群消息，这两个功能在钉钉上不会触发。</li>
           <li><strong>飞书、企业微信和钉钉目前只处理文本消息</strong>。图片和文件在这几家给的是下载凭据，需要另外换取，暂未接入。</li>
         </ul>
 
