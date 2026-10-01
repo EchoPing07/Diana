@@ -1607,6 +1607,10 @@ func (r *Runtime) effectiveConfigForEventLocked(event MessageEvent) BotConfig {
 	if groupCfg.TypingDelayEnabled != nil {
 		cfg.TypingDelayEnabled = copyBoolPointer(groupCfg.TypingDelayEnabled)
 	}
+	if groupCfg.StyleFilterEnabled != nil {
+		cfg.StyleFilterEnabled = copyBoolPointer(groupCfg.StyleFilterEnabled)
+	}
+	cfg.StyleFilterRules = mergeStyleFilterRules(cfg.StyleFilterRules, groupCfg.StyleFilterRules)
 	overrideIfSet(&cfg.ReplyMaxBubbles, groupCfg.ReplyMaxBubbles)
 	if groupCfg.ReplyMergeConfidencePercent > 0 {
 		cfg.ReplyMergeConfidencePercent = groupCfg.ReplyMergeConfidencePercent
