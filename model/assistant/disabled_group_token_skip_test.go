@@ -45,6 +45,18 @@ type disabledGroupSkipHarness struct {
 	memory   *testStructuredMemoryStore
 	style    *stubGroupStyleStore
 	provider *countingRouterProvider
+	groups   *testWritableGroupConfigStore
+	base     BotConfig
+}
+
+// setGroupEnabled 改 g1 的逐群开关。
+func (h disabledGroupSkipHarness) setGroupEnabled(t *testing.T, enabled bool) {
+	t.Helper()
+	if _, err := h.groups.SaveGroupConfig(GroupConfig{
+		BotProfileID: "a", GroupID: "g1", Enabled: enabled, EnabledSet: true,
+	}, h.base); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // newDisabledGroupSkipHarness wires a runtime with a searchable history store, a
@@ -80,7 +92,7 @@ func newDisabledGroupSkipHarness(t *testing.T, base BotConfig, groupEnabled bool
 	}
 	runtime.SetGroupConfigStore(store)
 
-	return disabledGroupSkipHarness{runtime: runtime, history: history, memory: memory, style: style, provider: provider}
+	return disabledGroupSkipHarness{runtime: runtime, history: history, memory: memory, style: style, provider: provider, groups: store, base: base}
 }
 
 // disabledGroupPhraseEvent 用一句短口癖：一条正常群消息。
@@ -129,8 +141,9 @@ func (s *stubGroupStyleStore) readCount() int {
 	return s.reads
 }
 
-// TestDisabledGroupKeepsBookkeepingSkipsModelCalls 群被关掉时，消息照常进历史和
-// 长期记忆，但跨群语义检索、Telegram 接话判定、主动回复路由和风格学习一次都不发。
+// TestDisabledGroupKeepsBookkeepingSkipsModelCalls 群被关掉（默认休眠档）时，消息照常
+// 进历史，但长期记忆提取、跨群语义检索、Telegram 接话判定、主动回复路由和风格学习
+// 一次都不发。
 func TestDisabledGroupKeepsBookkeepingSkipsModelCalls(t *testing.T) {
 	h := newDisabledGroupSkipHarness(t, BotConfig{}, false)
 	event := disabledGroupPhraseEvent()
@@ -150,9 +163,9 @@ func TestDisabledGroupKeepsBookkeepingSkipsModelCalls(t *testing.T) {
 	if got := len(h.runtime.history[sessionKey(event)]); got == 0 {
 		t.Fatal("disabled group message was not persisted to history")
 	}
-	// 仍然进长期记忆队列。
-	if got := len(h.memory.enqueued); got == 0 {
-		t.Fatal("disabled group message was not enqueued into long-term memory")
+	// 休眠档不进长期记忆队列：提取要花后台模型 token。
+	if got := len(h.memory.enqueued); got != 0 {
+		t.Fatalf("dormant group enqueued %d memory jobs, want 0", got)
 	}
 	// 风格学习要花一次后台模型调用，关掉的群不学，连存储都不查。
 	time.Sleep(50 * time.Millisecond)
@@ -227,7 +240,87 @@ func TestNotAdmittedGroupSkipsModelCalls(t *testing.T) {
 	if h.history.searches != 0 {
 		t.Fatalf("non-admitted group ran %d cross-group searches, want 0", h.history.searches)
 	}
+	// 没有群配置就没处选档位，按休眠算。
+	if got := len(h.memory.enqueued); got != 0 {
+		t.Fatalf("non-admitted group enqueued %d memory jobs, want 0", got)
+	}
+}
+
+// TestObservingDisabledGroupStillLearnsMemory 机器人设成静默旁观时保留旧行为：不回复、
+// 不花回复侧的 token，但消息照常排进长期记忆提取。
+func TestObservingDisabledGroupStillLearnsMemory(t *testing.T) {
+	h := newDisabledGroupSkipHarness(t, BotConfig{GroupAdmission: GroupAdmission{DisabledMode: GroupDisabledObserve}}, false)
+	event := disabledGroupPhraseEvent()
+
+	_, _, handled, outcome := h.runtime.prepareMessageEvent(context.Background(), event)
+
+	if handled || outcome != "ignored_policy" {
+		t.Fatalf("handled=%v outcome=%q, want ignored_policy", handled, outcome)
+	}
+	if got := h.provider.callCount(); got != 0 {
+		t.Fatalf("observing group made %d model calls, want 0", got)
+	}
 	if got := len(h.memory.enqueued); got == 0 {
-		t.Fatal("non-admitted group message was not enqueued into long-term memory")
+		t.Fatal("observing group message was not enqueued into long-term memory")
+	}
+}
+
+// TestGroupDisabledModeOverridesBot 群配置里的档位覆盖机器人的「群停用后」，两个方向
+// 都要生效；没填就跟随机器人。
+func TestGroupDisabledModeOverridesBot(t *testing.T) {
+	h := newDisabledGroupSkipHarness(t, BotConfig{GroupAdmission: GroupAdmission{DisabledMode: GroupDisabledObserve}}, false)
+	event := disabledGroupPhraseEvent()
+	if h.runtime.groupDormant(event) {
+		t.Fatal("没填覆盖时应当跟随机器人的静默旁观")
+	}
+	save := func(mode GroupDisabledMode) {
+		t.Helper()
+		if _, err := h.groups.SaveGroupConfig(GroupConfig{
+			BotProfileID: "a", GroupID: "g1", Enabled: false, EnabledSet: true, DisabledMode: mode,
+		}, h.base); err != nil {
+			t.Fatal(err)
+		}
+	}
+	save(GroupDisabledDormant)
+	if !h.runtime.groupDormant(event) {
+		t.Fatal("群覆盖成彻底关闭后应当休眠")
+	}
+	h.runtime.enqueueEventMemory(event, memoryEventText(event))
+	if got := len(h.memory.enqueued); got != 0 {
+		t.Fatalf("覆盖成彻底关闭的群入队了 %d 条记忆", got)
+	}
+
+	dormantBot := newDisabledGroupSkipHarness(t, BotConfig{}, false)
+	if _, err := dormantBot.groups.SaveGroupConfig(GroupConfig{
+		BotProfileID: "a", GroupID: "g1", Enabled: false, EnabledSet: true, DisabledMode: GroupDisabledObserve,
+	}, dormantBot.base); err != nil {
+		t.Fatal(err)
+	}
+	if dormantBot.runtime.groupDormant(event) {
+		t.Fatal("机器人彻底关闭、群覆盖成静默旁观时不该休眠")
+	}
+}
+
+// TestDormantGroupSkipsEveryMemoryEnqueue 休眠档的判断在入队入口：禁言、额度、积压
+// 合并这些分支直接调 enqueueEventMemory 也排不进去；群重新打开后照常入队。
+func TestDormantGroupSkipsEveryMemoryEnqueue(t *testing.T) {
+	h := newDisabledGroupSkipHarness(t, BotConfig{}, false)
+	event := disabledGroupPhraseEvent()
+
+	h.runtime.enqueueEventMemory(event, memoryEventText(event))
+	if got := len(h.memory.enqueued); got != 0 {
+		t.Fatalf("dormant group enqueued %d memory jobs, want 0", got)
+	}
+
+	h.setGroupEnabled(t, true)
+	h.runtime.enqueueEventMemory(event, memoryEventText(event))
+	if got := len(h.memory.enqueued); got != 1 {
+		t.Fatalf("reopened group enqueued %d memory jobs, want 1", got)
+	}
+	// 私聊不受群档位影响。
+	private := event
+	private.Kind, private.GroupID, private.MessageID = EventKindPrivate, "", "m2"
+	if h.runtime.groupDormant(private) {
+		t.Fatal("private event treated as dormant group")
 	}
 }
