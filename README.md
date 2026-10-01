@@ -74,7 +74,7 @@ docker compose -f docker-compose.yml -f docker-compose.update.yml pull && docker
 
 如果 Apple Silicon / ARM64 拉取旧镜像时报 `no matching manifest for linux/arm64/v8`，可临时在 `docker-compose.yml` 的 `services.diana` 下添加 `platform: linux/amd64`（需要 amd64 模拟支持，性能及浏览器兼容性可能受影响），原生 ARM64 镜像发布后删除此项；也可使用上方安装脚本原生部署。构建配置修改不会自动更新线上已有镜像。
 
-**② 登录控制台。** 打开 `http://127.0.0.1:18080`。管理员账号密码在刚才的终端输出里（Docker 方式用 `docker logs diana` 查看；脚本安装的还会写进安装目录的 `config.yaml`，别把这个文件给别人）。
+**② 登录控制台。** 打开 `http://127.0.0.1:18080`。管理员账号密码在刚才的终端输出里，只显示这一次，请当场保存（Docker 方式用 `docker logs diana` 查看）。密码只以哈希形式存在数据库里，不会留在 `config.yaml`；忘了就用下文的 `diana passwd` 重置。
 
 **③ 配置。** 控制台里依次完成三件事：
 
@@ -126,7 +126,7 @@ docker compose -f docker-compose.yml -f docker-compose.update.yml pull && docker
 <details>
 <summary>Docker 细节 / 手动下载 / 源码构建</summary>
 
-**Docker：** 镜像预装 Chromium 与 Noto CJK 中文字体，网页渲染和中文截图无需在容器内临时安装浏览器。启动时加载上方的 seccomp 配置，为 Chromium 沙箱开放所需的命名空间调用；无需 `--privileged`、`SYS_ADMIN` 或关闭浏览器沙箱。已有容器需按新启动参数重建。详见[浏览器依赖与容器配置](docs/browser-rendering.md)。镜像随每个版本发布（`ghcr.io/suink/diana:latest` 及版本号 tag）。OneBot 客户端（推荐 SnowLuma）连 `ws://<宿主机>:18080/onebot/v11/ws`。想预置配置（无人值守部署），把改好的 `config.yaml` 放到 `data/config.yaml`。从克隆的仓库本地构建时执行 `docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build`。普通部署需在宿主机拉新镜像并重建容器；启用上方的 Docker 更新助手后，版本面板也可发起更新。只需挂载 `data/` 一个目录，需要持久化的都在里面：数据库、运行日志（`data/logs/diana.log`）、可选的 `config.yaml`、插件、技能、MCP 配置、浏览器和编码 CLI 登录态、`ytb_cookies.txt` 及升级备份；容器启动时自动把它交给容器内的运行用户（UID 10001）。换了镜像版本后第一次启动，会在迁移数据库之前把它备份到 `data/.diana-updates/backups/`（3 天内最多 3 份）。旧部署挂在 `/app/config.yaml` 的配置仍然优先生效；想改放 `data/config.yaml`，要同时删掉旧 Compose 里的 `DIANA_CONFIG` 一行。旧配置里的 `log_path: logs/diana.log` 改成 `data/logs/diana.log`（或删掉这行）后，旧的 `logs/` 挂载就可以去掉。容器内进程以 UID 10001 运行，但 `docker exec` 默认是 root，在容器里手动执行 `diana` 命令请加 `-u diana`。
+**Docker：** 镜像预装 Chromium 与 Noto CJK 中文字体，网页渲染和中文截图无需在容器内临时安装浏览器。启动时加载上方的 seccomp 配置，为 Chromium 沙箱开放所需的命名空间调用；无需 `--privileged`、`SYS_ADMIN` 或关闭浏览器沙箱。已有容器需按新启动参数重建。详见[浏览器依赖与容器配置](docs/browser-rendering.md)。镜像随每个版本发布（`ghcr.io/suink/diana:latest` 及版本号 tag）。OneBot 客户端（推荐 SnowLuma）连 `ws://<宿主机>:18080/onebot/v11/ws`。想预置配置（无人值守部署），把改好的 `config.yaml` 放到 `data/config.yaml`。从克隆的仓库本地构建时执行 `docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build`。普通部署需在宿主机拉新镜像并重建容器；启用上方的 Docker 更新助手后，版本面板也可发起更新。只需挂载 `data/` 一个目录，需要持久化的都在里面：数据库、运行日志（`data/logs/diana.log`）、可选的 `config.yaml`、插件、技能、MCP 配置、浏览器和编码 CLI 登录态、`ytb_cookies.txt` 及升级备份；容器启动时自动把它交给容器内的运行用户（UID 10001）。换了镜像版本后第一次启动，会在迁移数据库之前把它备份到 `data/.diana-updates/backups/`（3 天内最多 3 份）。旧部署挂在 `/app/config.yaml` 的配置仍然优先生效；想改放 `data/config.yaml`，要同时删掉旧 Compose 里的 `DIANA_CONFIG` 一行。旧配置里的 `log_path: logs/diana.log` 改成 `data/logs/diana.log`（或删掉这行）后，旧的 `logs/` 挂载就可以去掉。容器里同样有 `diana` 命令，在宿主机执行 `docker exec diana diana status`（第一个 `diana` 是容器名）即可，`logs`、`doctor`、`config check` 等子命令同理；`docker exec` 默认是 root，`diana` 命令会自动降权到服务用户（UID 10001）再执行。
 
 **slim 轻量镜像（基础版）：** 同一仓库同时发布 `-slim` 变体（如 `ghcr.io/suink/diana:latest-slim`、`ghcr.io/suink/diana:v0.8.131-slim`）：不预装 Chromium、Noto CJK 字体、ffmpeg、yt-dlp 与 tesseract，体积约为完整版的四分之一（拉取 156 MB / 落盘 662 MB，完整版 619 MB / 2.14 GB），适合不需要网页渲染、媒体下载和 OCR 的部署。安装脚本会问你要哪一种，选择写进部署目录的 `.env`（`DIANA_IMAGE=`），以后 `docker compose pull` 自动跟着走；已部署的想切换，在终端里重跑安装脚本，或直接改 `.env` 里那一行再 `docker compose pull && docker compose up -d`（没有这个文件就新建，Compose 会自动读取）。内置浏览器这一档在 slim 上会明确报「找不到浏览器」并给出安装命令，不会悄悄失效。之后想用网页渲染，在宿主机执行 `docker exec -u root <容器名> sh -c 'apt-get update && apt-get install -y chromium fonts-noto-cjk'` 即可（WebUI 依赖管理里点一键安装会因进程非 root 失败，报错会直接附上这条命令）。注意容器重建后需重新安装，数据在挂出的 `data/` 里不受影响。
 
@@ -216,6 +216,26 @@ diana restart   # 重启服务
 diana doctor    # 体检：配置、目录、前端资源、服务健康
 ```
 
+Docker 部署在宿主机用 `docker exec diana diana <命令>`，例如 `docker exec diana diana logs -f`。
+
+**忘记密码**：密码只以哈希存在数据库里，任何地方都查不回原密码，只能重置。一键安装（Linux / macOS / Windows）直接执行：
+
+```sh
+diana passwd
+```
+
+它会先停掉服务，生成新的随机密码并只显示这一次，再把服务启动起来；所有已登录的浏览器会被登出，机器人、模型、插件等其他数据不动。执行前会要求输入 `y` 确认，加 `-y` 跳过（脚本里无法交互时必须加）；加 `--username 新账号名` 可以顺便改账号名。
+
+Docker 没法从容器里停掉自己，要在部署目录执行：
+
+```sh
+docker compose stop diana
+docker compose run --rm diana passwd
+docker compose start diana
+```
+
+手动运行（`run.sh` / `run.bat`）的进程 `diana passwd` 不会去动，先自己停掉再执行。
+
 **升级**：重跑一遍安装命令，或直接在控制台里点升级。两条路都会先备份数据、校验新版本，健康检查不过自动回滚。Docker 部署则是拉新镜像重建容器。
 
 **卸载**：`diana uninstall` 移除服务和程序、保留数据（重装即可恢复）；`diana uninstall --purge` 连数据一起删，不可恢复，会二次确认。
@@ -224,7 +244,7 @@ diana doctor    # 体检：配置、目录、前端资源、服务健康
 
 一句话原则：**平时的配置都在控制台网页里改，`config.yaml` 只管服务本身。**
 
-`config.yaml`（在安装目录）负责监听地址、端口、数据路径、管理员初始密码这类基础设施项，改完要重启。机器人和模型的配置存在数据库里，控制台改了立即生效——`config.yaml` 里的 `bot:` / `llm:` 段只在第一次启动、数据库还是空的时候播种一次，之后再改不会生效（启动日志会明说），这是给无人值守部署准备的。
+`config.yaml`（在安装目录）负责监听地址、端口、数据路径这类基础设施项，改完要重启。`admin:` 段可以预置首次启动的管理员账号密码，只在数据库里还没有管理员时生效；一键安装确认服务启动后会删掉其中的明文密码。机器人和模型的配置存在数据库里，控制台改了立即生效——`config.yaml` 里的 `bot:` / `llm:` 段只在第一次启动、数据库还是空的时候播种一次，之后再改不会生效（启动日志会明说），这是给无人值守部署准备的。
 
 会话上下文固定按机器人配置档隔离，同平台的不同机器人也不会因群号或用户 ID 相同而共用上下文。旧配置中的 `isolate_platform_contexts` 字段不再生效，原设置接口已移除。此前共享的历史保留在原位置，不会自动分配给各机器人；消息互通及单独启用的跨平台公共记忆不受影响。
 

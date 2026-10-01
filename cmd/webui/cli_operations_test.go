@@ -148,3 +148,69 @@ func sameDirectory(t *testing.T, a, b string) bool {
 	}
 	return os.SameFile(infoA, infoB)
 }
+
+// TestCLIWorksWithoutConfigFile Docker 默认没有 config.yaml，服务按内置默认值
+// 运行；命令行也得照常工作，日志位置取 DIANA_LOG_PATH。
+func TestCLIWorksWithoutConfigFile(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	t.Setenv(configPathEnv, "")
+	logPath := filepath.Join(root, "data", "logs", "diana.log")
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(logPath, []byte("hello from diana\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(logPathEnv, logPath)
+
+	config, path, err := loadCLIConfig(nil)
+	if err != nil || path != "" || config.Storage.LogPath != logPath {
+		t.Fatalf("loadCLIConfig() = %+v, %q, %v", config.Storage, path, err)
+	}
+	var output strings.Builder
+	if err := runLogsCommand([]string{"--lines", "1"}, &output); err != nil || !strings.Contains(output.String(), "hello from diana") {
+		t.Fatalf("logs = %q, %v", output.String(), err)
+	}
+	output.Reset()
+	if err := runConfigCommand([]string{"check"}, &output); err != nil || !strings.Contains(output.String(), "built-in defaults") {
+		t.Fatalf("config check = %q, %v", output.String(), err)
+	}
+	if err := runConfigCommand([]string{"path"}, &strings.Builder{}); err == nil {
+		t.Fatal("config path reported a file that does not exist")
+	}
+	if err := runLogsCommand([]string{"--config", filepath.Join(root, "missing.yaml")}, &strings.Builder{}); err == nil {
+		t.Fatal("logs accepted a missing explicit config")
+	}
+}
+
+func TestRunConfigCheckRejectsShortAdminPassword(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte("admin:\n  username: admin\n  password: admin\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := runConfigCommand([]string{"check", "--config", configPath}, &strings.Builder{})
+	if err == nil || !strings.Contains(err.Error(), "admin.password") || !strings.Contains(err.Error(), configPath) {
+		t.Fatalf("config check error = %v", err)
+	}
+	if err := os.WriteFile(configPath, []byte("admin:\n  username: admin\n  password: long-enough\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := runConfigCommand([]string{"check", "--config", configPath}, &strings.Builder{}); err != nil {
+		t.Fatalf("valid admin section rejected: %v", err)
+	}
+}
+
+// TestAdminPasswordInlineCommentIsNotPartOfPassword 一键安装写的 admin.password
+// 行尾带注释，注释不能被当成密码的一部分。
+func TestAdminPasswordInlineCommentIsNotPartOfPassword(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	content := "admin:\n  username: 'diana#abcd1234abcd1234'\n  password: 'it''s-a-secret'  # 只用于首次启动创建管理员\n"
+	if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config, err := loadAppConfig(configPath)
+	if err != nil || config.Admin.Password != "it's-a-secret" {
+		t.Fatalf("admin.password = %q, %v", config.Admin.Password, err)
+	}
+}

@@ -74,7 +74,7 @@ The command above applies to the default installation. If you used `DIANA_DOCKER
 
 If an older image fails on Apple Silicon / ARM64 with `no matching manifest for linux/arm64/v8`, temporarily add `platform: linux/amd64` under `services.diana` in `docker-compose.yml` (requires amd64 emulation; performance and browser compatibility may be affected). Remove it once a native ARM64 image is published. Alternatively, use the native installer above. Build configuration changes do not update existing registry images.
 
-**② Log in to the console.** Open `http://127.0.0.1:18080`. The admin username and password are in the terminal output (for Docker, check `docker logs diana`; script installs also write them to `config.yaml` in the install directory — don't share that file).
+**② Log in to the console.** Open `http://127.0.0.1:18080`. The admin username and password are in the terminal output and shown only once, so save them right away (for Docker, check `docker logs diana`). The password is stored only as a hash in the database, not in `config.yaml`; if you forget it, reset it with `diana passwd` (see below).
 
 **③ Configure.** Three things in the console:
 
@@ -126,7 +126,7 @@ That's it. No reply? The event center tells you why; `diana doctor` checks servi
 <details>
 <summary>Docker details / manual download / building from source</summary>
 
-**Docker:** Chromium and Noto CJK fonts are preinstalled. Load the supplied seccomp profile as shown above to allow Chromium to create its browser sandbox; privileged mode, SYS_ADMIN and disabling the browser sandbox are not required. Recreate existing containers with the new option. An image is published with every release (`ghcr.io/suink/diana:latest` plus version tags), alongside a slim variant (`ghcr.io/suink/diana:latest-slim`) without Chromium, CJK fonts, ffmpeg, yt-dlp and tesseract. To switch an existing deployment, change `DIANA_IMAGE=` in the deployment directory's `.env` and run `docker compose pull && docker compose up -d`. OneBot clients (SnowLuma recommended) connect to `ws://<docker-host>:18080/onebot/v11/ws`. To pre-seed configuration (unattended deployments), put your `config.yaml` at `data/config.yaml`. For source builds from a cloned repository, run `docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build`. Ordinary deployments upgrade by pulling the new image and recreating the container; with the optional Docker updater enabled, the console can request that operation. Only `data/` needs to be mounted; everything that must persist lives there: the database, the runtime log (`data/logs/diana.log`), the optional `config.yaml`, plugins, skills, MCP configuration, browser and coding-CLI logins, `ytb_cookies.txt` and update backups. On start the container hands it to its runtime user (UID 10001). The first start on a new image version backs up the database to `data/.diana-updates/backups/` before migrating it (at most 3 within 3 days). A config file already mounted at `/app/config.yaml` still takes precedence; to move it to `data/config.yaml`, also delete the `DIANA_CONFIG` line from an old Compose file. Once an old config's `log_path: logs/diana.log` is changed to `data/logs/diana.log` (or removed), the old `logs/` mount can be dropped. Diana runs as UID 10001, but `docker exec` defaults to root, so add `-u diana` when running `diana` commands in the container.
+**Docker:** Chromium and Noto CJK fonts are preinstalled. Load the supplied seccomp profile as shown above to allow Chromium to create its browser sandbox; privileged mode, SYS_ADMIN and disabling the browser sandbox are not required. Recreate existing containers with the new option. An image is published with every release (`ghcr.io/suink/diana:latest` plus version tags), alongside a slim variant (`ghcr.io/suink/diana:latest-slim`) without Chromium, CJK fonts, ffmpeg, yt-dlp and tesseract. To switch an existing deployment, change `DIANA_IMAGE=` in the deployment directory's `.env` and run `docker compose pull && docker compose up -d`. OneBot clients (SnowLuma recommended) connect to `ws://<docker-host>:18080/onebot/v11/ws`. To pre-seed configuration (unattended deployments), put your `config.yaml` at `data/config.yaml`. For source builds from a cloned repository, run `docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build`. Ordinary deployments upgrade by pulling the new image and recreating the container; with the optional Docker updater enabled, the console can request that operation. Only `data/` needs to be mounted; everything that must persist lives there: the database, the runtime log (`data/logs/diana.log`), the optional `config.yaml`, plugins, skills, MCP configuration, browser and coding-CLI logins, `ytb_cookies.txt` and update backups. On start the container hands it to its runtime user (UID 10001). The first start on a new image version backs up the database to `data/.diana-updates/backups/` before migrating it (at most 3 within 3 days). A config file already mounted at `/app/config.yaml` still takes precedence; to move it to `data/config.yaml`, also delete the `DIANA_CONFIG` line from an old Compose file. Once an old config's `log_path: logs/diana.log` is changed to `data/logs/diana.log` (or removed), the old `logs/` mount can be dropped. The `diana` command is available inside the container too: run `docker exec diana diana status` on the host (the first `diana` is the container name), and likewise for `logs`, `doctor`, `config check` and the other subcommands. `docker exec` defaults to root; the `diana` command drops to the service user (UID 10001) before running.
 
 **Manual download:** grab the **full package** for your platform (`.tar.gz` / `.zip`, includes the backend, prebuilt WebUI and launch scripts) from [Releases](https://github.com/SuInk/Diana/releases), verify `SHA256SUMS`, extract it, then run `run.sh` / `run.bat`. No separate WebUI deployment or Node.js installation is needed. Releases no longer provide standalone binaries; for custom deployments, extract the executable and frontend assets from the full package.
 
@@ -190,6 +190,26 @@ diana restart   # restart the service
 diana doctor    # check config, directories, frontend assets, service health
 ```
 
+For Docker, use `docker exec diana diana <command>` on the host, e.g. `docker exec diana diana logs -f`.
+
+**Forgot the password**: the password is stored only as a hash in the database, so it cannot be recovered anywhere — reset it instead. For one-click installs (Linux / macOS / Windows) just run:
+
+```sh
+diana passwd
+```
+
+It stops the service, generates a new random password and shows it once, then starts the service again; every browser session is signed out, and bots, models, plugins and all other data are left untouched. It asks for `y` before changing anything; pass `-y` to skip the prompt (required when there is no terminal, e.g. in scripts). Add `--username NEW_NAME` to rename the account at the same time.
+
+Docker cannot stop itself from inside the container, so run this in the deployment directory:
+
+```sh
+docker compose stop diana
+docker compose run --rm diana passwd
+docker compose start diana
+```
+
+A process you started by hand (`run.sh` / `run.bat`) is left alone: stop it yourself, then run `diana passwd`.
+
 **Upgrading**: for complete Release packages, re-run the install command or click upgrade in the console; both paths back up data, verify the package and roll back if the health check fails. Docker deployments pull and recreate the container, either on the host or through the optional updater. Docker image updates do not automatically roll back after a failed health check; restore a known version tag on the host if needed.
 
 **Uninstalling**: `diana uninstall` removes the service and program but keeps your data (reinstall to pick up where you left off); `diana uninstall --purge` deletes the data too — irreversible, with a second confirmation.
@@ -198,7 +218,7 @@ diana doctor    # check config, directories, frontend assets, service health
 
 One rule of thumb: **everyday settings are changed in the web console; `config.yaml` only covers the service itself.**
 
-`config.yaml` (in the install directory) handles infrastructure: listen address, port, data paths, initial admin password — changes require a restart. Bot and model configuration lives in the database and takes effect immediately when changed in the console. The `bot:` / `llm:` sections of `config.yaml` are seeded **once**, on first startup with an empty database, and are ignored afterwards (the startup log says so explicitly) — they exist for unattended deployments.
+`config.yaml` (in the install directory) handles infrastructure: listen address, port, data paths — changes require a restart. The `admin:` section can preset the first administrator's username and password; it only applies while the database has no administrator, and the one-click installer removes the plain-text password once Diana has started. Bot and model configuration lives in the database and takes effect immediately when changed in the console. The `bot:` / `llm:` sections of `config.yaml` are seeded **once**, on first startup with an empty database, and are ignored afterwards (the startup log says so explicitly) — they exist for unattended deployments.
 
 Every field is documented in [`config.example.yaml`](./config.example.yaml).
 

@@ -29,7 +29,7 @@ func runStatusCommand(args []string, output io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("Diana is not reachable at %s: %w", address, err)
 	}
-	_, err = fmt.Fprintf(output, "Status:  %s\nVersion: %s\nAddress: %s\nUptime:  %s\nConfig:  %s\n", health.Status, health.Version, address, formatUptime(health.UptimeSeconds), path)
+	_, err = fmt.Fprintf(output, "Status:  %s\nVersion: %s\nAddress: %s\nUptime:  %s\nConfig:  %s\n", health.Status, health.Version, address, formatUptime(health.UptimeSeconds), configPathLabel(path))
 	return err
 }
 
@@ -46,19 +46,11 @@ func runRestartCommand(args []string, output io.Writer) error {
 		return err
 	}
 	address := healthAddress(config)
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	for {
-		if _, err := fetchHealth(ctx, address); err == nil {
-			_, err = fmt.Fprintf(output, "Diana restarted and is healthy at %s\n", address)
-			return err
-		}
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("Diana restart was requested but health did not recover at %s", address)
-		case <-time.After(500 * time.Millisecond):
-		}
+	if err := waitForHealth(address, 20*time.Second); err != nil {
+		return fmt.Errorf("Diana restart was requested but health did not recover at %s", address)
 	}
+	_, err = fmt.Fprintf(output, "Diana restarted and is healthy at %s\n", address)
+	return err
 }
 
 func runDoctorCommand(args []string, output io.Writer) error {
@@ -75,12 +67,22 @@ func runDoctorCommand(args []string, output io.Writer) error {
 			_, _ = fmt.Fprintln(output, "[fail] "+failure)
 		}
 	}
-	check(path != "", "config: "+path, "config.yaml was not found")
+	if path == "" {
+		// 没有配置文件是合法部署（Docker 默认就是这样），服务按内置默认值运行。
+		_, _ = fmt.Fprintln(output, "[warn] config: "+configPathLabel(path))
+	} else {
+		check(true, "config: "+path, "")
+	}
 	port := stringOr(config.Server.Port, "18080")
 	portNumber, portErr := strconv.Atoi(port)
 	check(portErr == nil && portNumber > 0 && portNumber <= 65535, "port: "+port, "invalid server.port: "+port)
-	if config.Storage.DBPath != "" {
-		directory := filepath.Dir(resolveConfigRelative(path, config.Storage.DBPath))
+	dbSetting := strings.TrimSpace(config.Storage.DBPath)
+	if dbSetting == "" && path == "" {
+		// 没有配置文件时服务用默认的 data/diana.db，也照样检查。
+		dbSetting = filepath.Join("data", "diana.db")
+	}
+	if dbSetting != "" {
+		directory := filepath.Dir(resolveConfigRelative(path, dbSetting))
 		check(directoryWritable(directory), "database directory writable: "+directory, "database directory is not writable: "+directory)
 	}
 	if config.Storage.LogPath != "" {
@@ -119,6 +121,9 @@ func runConfigCommand(args []string, output io.Writer) error {
 	}
 	switch subcommand {
 	case "path":
+		if path == "" {
+			return fmt.Errorf("no config.yaml is in use; Diana runs on built-in defaults (create data/config.yaml or set %s to add one)", configPathEnv)
+		}
 		_, err = fmt.Fprintln(output, path)
 		return err
 	case "check":
@@ -128,7 +133,10 @@ func runConfigCommand(args []string, output io.Writer) error {
 		if _, _, err := config.llmSeedConfig(); err != nil {
 			return err
 		}
-		_, err = fmt.Fprintln(output, "Configuration is valid: "+path)
+		if err := config.validateAdmin(); err != nil {
+			return err
+		}
+		_, err = fmt.Fprintln(output, "Configuration is valid: "+configPathLabel(path))
 		return err
 	default:
 		return fmt.Errorf("unknown config command: %s", subcommand)
@@ -156,7 +164,9 @@ func loadCLIConfig(args []string) (appConfig, string, error) {
 		path = resolveConfigPath(nil)
 	}
 	if path == "" {
-		return appConfig{}, "", fmt.Errorf("config.yaml was not found; pass --config to locate it")
+		// 和服务本身一致：找不到配置文件就用内置默认值，而不是让命令行直接报错。
+		config, err := loadAppConfig("")
+		return config, "", err
 	}
 	absolute, err := filepath.Abs(path)
 	if err == nil {
@@ -167,6 +177,13 @@ func loadCLIConfig(args []string) (appConfig, string, error) {
 	}
 	config, err := loadAppConfig(path)
 	return config, path, err
+}
+
+func configPathLabel(path string) string {
+	if path == "" {
+		return "none (built-in defaults)"
+	}
+	return path
 }
 
 func healthAddress(config appConfig) string {
