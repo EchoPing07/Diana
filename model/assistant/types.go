@@ -401,7 +401,11 @@ type Reminder struct {
 	// ScheduleAnchorAt 是周期任务的时间网格原点：每次成功后下一次落在 anchor + k*interval
 	// 上，不跟着实际开跑时间或失败重试漂。「每周日 22:00」靠它一直停在 22:00。
 	// 零值是这个字段之前的旧记录，仍按实际开跑时间往后排。
-	ScheduleAnchorAt        time.Time `json:"schedule_anchor_at,omitempty"`
+	ScheduleAnchorAt time.Time `json:"schedule_anchor_at,omitempty"`
+	// Timezone 是建这条任务时用的时区（IANA 名，发言者记过时区就是他的，否则是机器人
+	// 时区）。「每周一」「每月 1 号」按它数日子，之后改机器人时区不会让已有任务挪天。
+	// 空值是这个字段之前的旧记录，按锚点自带的时区排，保持升级前的行为。
+	Timezone                string    `json:"timezone,omitempty"`
 	LastRunAt               time.Time `json:"last_run_at,omitempty"`
 	CancelledAt             time.Time `json:"cancelled_at,omitempty"`
 	LastError               string    `json:"last_error,omitempty"`
@@ -791,9 +795,12 @@ type BotConfig struct {
 	VideoGenerationDailyGroupLimit int64 `json:"video_generation_daily_group_limit,omitempty"`
 	VideoGenerationDailyUserLimit  int64 `json:"video_generation_daily_user_limit,omitempty"`
 	// DailyLimitTimezone 是每日次数在哪个时区的零点重置（IANA 名，如 Asia/Shanghai）。
-	// 留空读 TZ 环境变量，再没有按北京时间：Docker 镜像默认是 UTC，不能拿进程本地
-	// 时区当日界线。
+	// 留空跟随机器人时区（Timezone）。
 	DailyLimitTimezone string `json:"daily_limit_timezone,omitempty"`
+	// Timezone 是机器人的时区（IANA 名，如 Asia/Shanghai）：注入的当前时间、回复时段、
+	// 每日次数的日界线、「明天八点」的换算都按它。留空读 TZ 环境变量，再用本机时区；
+	// 本机是裸 UTC（Docker 默认）时按北京时间，见 BotConfig.Location。
+	Timezone string `json:"timezone,omitempty"`
 	// ReplySamplePercent 是这台机器人的每群回复抽样率默认值（1–100）：没 @、没引用
 	// 机器人、没叫名字的群消息，只有这个比例会交给模型判断要不要接话。0 表示不抽样。
 	ReplySamplePercent int `json:"reply_sample_percent,omitempty"`
