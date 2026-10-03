@@ -651,11 +651,11 @@ type qqRefEntry struct {
 	// key 是 REFIDX_ 引用键；msgID 是同一消息的平台 id（入站 d.id / 出站发送响应
 	// id）。出站引用（message_reference）按官方字段说明取 REFIDX_ 形态，而运行时
 	// 侧引用目标用的是平台 id，两个方向都靠这张表互查。
-	key    string
-	msgID  string
-	user   string
-	bot    bool
-	at     time.Time
+	key   string
+	msgID string
+	user  string
+	bot   bool
+	at    time.Time
 }
 
 // recordInbound 登记一条入站消息的 msg_idx。speaker 已经是统一事件的 UserID。
@@ -1409,7 +1409,7 @@ func qqOfficialEventFromDispatch(eventType string, data json.RawMessage, selfID 
 		quotedText, quotedMedia := qqOfficialQuotedPayload(msg.MsgElements)
 		refKey := firstNonEmpty(msg.sceneExtValue("ref_msg_idx"), quoted)
 		event.Quoted = &QuotedMessage{
-			MessageID: refKey,
+			MessageID:  refKey,
 			RawMessage: quotedText,
 			Segments:   quotedMedia,
 		}
