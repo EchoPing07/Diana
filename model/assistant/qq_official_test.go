@@ -217,8 +217,8 @@ func TestQQOfficialDispatchEnrichesQuoteSenderFromRefIndex(t *testing.T) {
 		t.Fatalf("events = %d, want two dispatched events", len(got))
 	}
 	quoted := got[1].Quoted
-	if quoted == nil || quoted.UserID != "member-1" {
-		t.Fatalf("quoted = %+v, want the sender resolved from the ref index", quoted)
+	if quoted == nil || quoted.UserID != "member-1" || quoted.MessageID != "m-1" {
+		t.Fatalf("quoted = %+v, want the sender and platform message ID resolved from the ref index", quoted)
 	}
 	if got[1].ToMe {
 		t.Fatal("quoting another member's message is not addressed to the bot")
@@ -234,7 +234,7 @@ func TestQQOfficialDispatchEnrichesQuoteSenderFromRefIndex(t *testing.T) {
 	if len(got) != 3 {
 		t.Fatalf("events = %d, want three dispatched events", len(got))
 	}
-	if quoted := got[2].Quoted; quoted == nil || quoted.UserID != "bot-1" {
+	if quoted := got[2].Quoted; quoted == nil || quoted.UserID != "bot-1" || quoted.MessageID != "m-bot" {
 		t.Fatalf("quoted = %+v, want the bot itself resolved", quoted)
 	}
 	if !got[2].ToMe {
@@ -242,20 +242,19 @@ func TestQQOfficialDispatchEnrichesQuoteSenderFromRefIndex(t *testing.T) {
 	}
 }
 
-// 索引过期后反查不到发送者：引用关系仍交付，只是 UserID 为空，交给上层继续按
-// 历史回查（enrichReplyReference 会用 MessageID 查本地历史）。
+// 索引过期后无法还原发送者和平台消息 ID；事件携带的引用正文及附件仍可直接使用。
 func TestQQRefLedgerExpiresAndPrunes(t *testing.T) {
 	var l qqRefLedger
 	now := time.Now()
 	l.recordInbound("REFIDX_a", "m-a", "member-1", false, now)
-	if sender, _, ok := l.lookup("REFIDX_a", now.Add(time.Second)); !ok || sender != "member-1" {
-		t.Fatalf("lookup = %q,%v, want member-1", sender, ok)
+	if ref, ok := l.lookup("REFIDX_a", now.Add(time.Second)); !ok || ref.user != "member-1" || ref.msgID != "m-a" {
+		t.Fatalf("lookup = %+v,%v, want member-1/m-a", ref, ok)
 	}
 	l.recordInbound("REFIDX_a", "m-a", "member-2", false, now.Add(qqRefLedgerTTL+time.Second))
-	if sender, _, ok := l.lookup("REFIDX_a", now.Add(qqRefLedgerTTL+2*time.Second)); !ok || sender != "member-2" {
-		t.Fatalf("lookup = %q,%v, want the refreshed sender", sender, ok)
+	if ref, ok := l.lookup("REFIDX_a", now.Add(qqRefLedgerTTL+2*time.Second)); !ok || ref.user != "member-2" {
+		t.Fatalf("lookup = %+v,%v, want the refreshed sender", ref, ok)
 	}
-	if _, _, ok := l.lookup("REFIDX_missing", now); ok {
+	if _, ok := l.lookup("REFIDX_missing", now); ok {
 		t.Fatal("an unknown key must not resolve")
 	}
 	// 平台 id → REFIDX_ 反查：入站与出站两侧都登记，同一张表双向可查。

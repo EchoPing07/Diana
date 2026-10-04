@@ -404,9 +404,12 @@ func (c *QQOfficialChannel) handleDispatch(ctx context.Context, payload qqGatewa
 		c.refs.recordInbound(key, event.MessageID, event.UserID, source.Author.Bot, time.Now())
 	}
 	if event.Quoted != nil && event.Quoted.MessageID != "" {
-		if sender, _, ok := c.refs.lookup(event.Quoted.MessageID, time.Now()); ok && sender != "" {
-			event.Quoted.UserID = sender
-			if sender == event.SelfID {
+		if ref, ok := c.refs.lookup(event.Quoted.MessageID, time.Now()); ok {
+			// 历史和运行时引用目标使用平台消息 ID；REFIDX_ 只留在通道索引里，
+			// 出站时再由 refIdxFor 转回官方引用键。
+			event.Quoted.MessageID = firstNonEmpty(ref.msgID, event.Quoted.MessageID)
+			event.Quoted.UserID = ref.user
+			if ref.user != "" && ref.user == event.SelfID && !event.SenderIsBot {
 				// 引用的正是自己的发言：当被点名处理。
 				event.ToMe = true
 			}
@@ -689,20 +692,20 @@ func (l *qqRefLedger) record(entry qqRefEntry, now time.Time) {
 }
 
 // lookup 反查一个引用索引键（入站 ref_msg_idx / msg_idx）。取不到返回空。
-func (l *qqRefLedger) lookup(key string, now time.Time) (userID string, isBot bool, ok bool) {
+func (l *qqRefLedger) lookup(key string, now time.Time) (qqRefEntry, bool) {
 	key = strings.TrimSpace(key)
 	if key == "" {
-		return "", false, false
+		return qqRefEntry{}, false
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.pruneLocked(now)
 	for i := range l.entries {
 		if l.entries[i].key == key {
-			return l.entries[i].user, l.entries[i].bot, true
+			return l.entries[i], true
 		}
 	}
-	return "", false, false
+	return qqRefEntry{}, false
 }
 
 // refIdxFor 由消息的平台 id（入站 d.id / 出站发送响应 id）反查它的 REFIDX_
@@ -1390,13 +1393,15 @@ func qqOfficialEventFromDispatch(eventType string, data json.RawMessage, selfID 
 	segments = append(segments, mergedMedia...)
 	segments = append(segments, qqOfficialMediaSegments(msg.Attachments)...)
 	event := MessageEvent{
-		Time:       platformEventTime(msg.Timestamp),
-		SelfID:     selfID,
-		MessageID:  msg.ID,
-		RawMessage: text,
-		Segments:   segments,
-		SenderName: firstNonEmpty(msg.Member.Nick, msg.Author.Username),
-		ToMe:       true,
+		Platform:    PlatformQQOfficial,
+		Time:        platformEventTime(msg.Timestamp),
+		SelfID:      selfID,
+		MessageID:   msg.ID,
+		RawMessage:  text,
+		Segments:    segments,
+		SenderName:  firstNonEmpty(msg.Member.Nick, msg.Author.Username),
+		SenderIsBot: msg.Author.Bot,
+		ToMe:        true,
 	}
 	if quoted != "" {
 		event.Quoted = &QuotedMessage{MessageID: quoted}
@@ -1464,17 +1469,20 @@ func qqOfficialEventFromDispatch(eventType string, data json.RawMessage, selfID 
 
 // qqOfficialQuotedPayload 把引用消息 msg_elements 里的被引用正文与附件拼出来。
 //
-// 文字直接在元素 content 里，媒体附件与顶层 attachments 完全同构（复用
-// qqOfficialMediaSegments 拆段）。图文混发不拆元素：同一个元素同时带正文与附件。
-// 元素里拍平的展示文本（如 [图片] 占位）不动，那是平台给的原文。
+// 正文和媒体按普通消息的规则拆段：文字必须进入 text 段，否则下游读取媒体段时
+// 会跳过 RawMessage 里的配文；聊天记录 content 里的附件也要进入识图 / 抽帧链路。
 func qqOfficialQuotedPayload(elements []qqOfficialMsgElement) (string, []MessageSegment) {
 	var parts []string
-	var segments []MessageSegment
+	var media []MessageSegment
 	for _, element := range elements {
-		if content := strings.TrimSpace(element.Content); content != "" {
+		content := qqOfficialFaceText(strings.TrimSpace(element.Content))
+		content, mergedMedia := qqOfficialMergedForwardMedia(content)
+		if content != "" {
 			parts = append(parts, content)
 		}
-		segments = append(segments, qqOfficialMediaSegments(element.Attachments)...)
+		media = append(media, mergedMedia...)
+		media = append(media, qqOfficialMediaSegments(element.Attachments)...)
 	}
-	return strings.Join(parts, "\n"), segments
+	text := strings.Join(parts, "\n")
+	return text, append(platformTextSegments(text, ""), media...)
 }
