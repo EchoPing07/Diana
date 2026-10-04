@@ -1841,6 +1841,13 @@ func (r *Runtime) routeMessageEvent(ctx context.Context, event MessageEvent) (Me
 	// 已经挪到回复之后（见 enqueueBotReplyLoopCheck），不再占用户感知的延迟。
 	restriction, blocked := r.activeReplySuppression(event, now)
 	r.remember(event)
+	// QQ 官方机器人不能回复同群的其他 Bot。保留完整引用和消息历史，但不能让
+	// 被引用者是本机、触发称呼或主动接话重新开启回复。
+	if event.Platform == PlatformQQOfficial && event.Kind == EventKindGroup && event.SenderIsBot && !r.isSelfMessage(event) {
+		event.routingReason = "QQ 官方群消息来自其他机器人，仅保留上下文"
+		r.record(r.decisionEventRecord(event, text, "ignored_bot_message"))
+		return event, text, false, "ignored_bot_message"
+	}
 	// 语音转写、图片和文件解析、转发展开都在上面做完了：从这一刻起它才能被同一个人
 	// 后到的消息接走（见 sender_burst.go）。
 	r.noteSenderTurnReady(event)
@@ -6877,7 +6884,9 @@ func (r *Runtime) applyOutgoingReplyMarker(ctx context.Context, event MessageEve
 	if scope := identityPrivacyScopeFromContext(ctx); scope != nil {
 		id = scope.restoreText(id)
 	}
-	if !validOutgoingReplyMessageID(id) {
+	// 平台感知：QQ 官方的 ROBOT1.0_/REFIDX_ 不是纯数字，数字校验会把模型自发
+	// 写的标记消费后丢弃。目标存在性由下面的历史回查把关。
+	if !replyMarkerIDAcceptable(event.Platform, id) {
 		return msg
 	}
 	// 指向当前这条消息时不必再查一次：它一定存在，而历史查询可能因为存储未接入或
