@@ -23,6 +23,14 @@ export function releaseAllowedOnChannel(release: { tag: string; prerelease?: boo
   return false;
 }
 
+/** 回退范围固定为 GitHub 最新 5 个稳定 Release，当前版本和较新版本也占名额。 */
+export function latestRollbackReleaseTags(releases: readonly { tag: string; prerelease?: boolean }[]): Set<string> {
+  const stable = releases.filter((release) => !release.prerelease
+    && release.tag.trim() !== ""
+    && !release.tag.split("+")[0].includes("-"));
+  return new Set(stable.slice(0, 5).map((release) => release.tag));
+}
+
 export interface ChannelSwitchConfirm {
   title: string;
   message: string;
@@ -32,7 +40,7 @@ export interface ChannelSwitchConfirm {
 
 /** 切换更新通道前的确认文案。autoInstall 开着时切到预发布通道要额外提醒。 */
 export function channelSwitchConfirm(target: UpdateChannel, autoInstall: boolean): ChannelSwitchConfirm {
-  const autoInstallNote = autoInstall ? "「自动重启并安装」已开启，符合条件的新版本下载校验后会自动安装并重启。" : "";
+  const autoInstallNote = autoInstall ? "「自动安装并重启」已开启，符合条件的新版本下载校验后会自动安装并重启。" : "";
   switch (target) {
     case "canary":
       return {
