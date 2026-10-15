@@ -4617,3 +4617,18 @@ export const setDesktopTakeover = (active: boolean) => requestJSON("/api/desktop
 export const controlDesktopJob = (id: string, action: "pause" | "resume" | "confirm" | "cancel") => requestJSON(`/api/desktop-control/jobs/${encodeURIComponent(id)}/${action}`, {method: "POST"});
 
 export const confirmDesktopAction = (id: string) => requestJSON(`/api/desktop-control/actions/${encodeURIComponent(id)}/confirm`, {method:"POST"});
+
+export function readResolverCookieFile(): Promise<{ content: string; configured: boolean }> {
+ return requestJSON("/api/assistant/plugins/resolver/cookie-file/read", { method: "POST", body: "{}" });
+}
+export function saveResolverCookieFile(content: string): Promise<{ path: string }> {
+ return requestJSON("/api/assistant/plugins/resolver/cookie-file", { method: "POST", body: JSON.stringify({ content }) });
+}
+
+export function checkResolverCookieFile(content: string, format = false): Promise<{ count: number; youtube_count: number; expired_count: number; content?: string }> {
+ return requestJSON("/api/assistant/plugins/resolver/cookie-file/check", { method: "POST", body: JSON.stringify({ content, format }) });
+}
+
+export function testResolverCookieLogin(content: string): Promise<{ state: "valid" | "invalid" | "unknown"; message: string }> {
+ return requestJSON("/api/assistant/plugins/resolver/cookie-file/login", { method: "POST", body: JSON.stringify({ content }) });
+}
