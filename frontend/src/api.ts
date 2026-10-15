@@ -4038,6 +4038,7 @@ export interface AssistantTask {
   watch_issues?: boolean;
   watch_releases?: boolean;
   watch_release_kinds?: RepositoryWatchReleaseKind[];
+  blocked_users?: string[];
   watch_stars?: boolean;
   star_notify_mode?: "growth" | "milestone";
   star_notify_threshold?: number;
@@ -4090,6 +4091,7 @@ export interface RepositoryWatchInput {
   watch_issues: boolean;
   watch_releases: boolean;
   watch_release_kinds?: RepositoryWatchReleaseKind[];
+  blocked_users?: string[];
   watch_stars: boolean;
   star_notify_mode?: "growth" | "milestone";
   star_notify_threshold?: number;
@@ -4617,6 +4619,11 @@ export const setDesktopTakeover = (active: boolean) => requestJSON("/api/desktop
 export const controlDesktopJob = (id: string, action: "pause" | "resume" | "confirm" | "cancel") => requestJSON(`/api/desktop-control/jobs/${encodeURIComponent(id)}/${action}`, {method: "POST"});
 
 export const confirmDesktopAction = (id: string) => requestJSON(`/api/desktop-control/actions/${encodeURIComponent(id)}/confirm`, {method:"POST"});
+
+export interface GitHubUserIdentity { login: string; name?: string; }
+export function lookupGitHubUser(login: string): Promise<{ user?: GitHubUserIdentity }> {
+  return requestJSON(`/api/assistant/plugins/github/user?login=${encodeURIComponent(login)}`);
+}
 
 export function readResolverCookieFile(): Promise<{ content: string; configured: boolean }> {
  return requestJSON("/api/assistant/plugins/resolver/cookie-file/read", { method: "POST", body: "{}" });
