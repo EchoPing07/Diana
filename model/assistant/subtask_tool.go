@@ -523,6 +523,9 @@ func (r *Runtime) recordSubtaskDebugEvent(ctx context.Context, event agent.RunEv
 
 func (r *Runtime) subtaskSearchTools(event MessageEvent) ([]agent.Tool, error) {
 	var tools []agent.Tool
+	if r.plugins != nil && r.plugins.builtInBrowser {
+		tools = NewBuiltInBrowserRenderer().AgentTools()
+	}
 	if r.plugins != nil {
 		cfg := r.effectiveConfigForEvent(event)
 		var err error

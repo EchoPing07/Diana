@@ -6,7 +6,6 @@ package assistant
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -124,12 +123,8 @@ func (t *dianaGroupRelationsTool) Run(ctx context.Context, input map[string]any)
 	}
 	var browserErr error
 	if rasterErr != nil {
-		// 浏览器归「网页渲染」插件管：那个插件停用就是不许起浏览器，这里不能绕过去
-		// 自己起一个。停用也不至于没图——纯 Go 那条路不需要浏览器。
 		if fontErr != nil {
 			browserErr = fontErr
-		} else if !t.runtime.sandboxedBrowserEnabled(t.event) {
-			browserErr = errors.New("「网页渲染」插件没有启用，不能起浏览器")
 		} else {
 			page := RenderGroupRelationHTML(graph, title, rangeLabel, maxSeats)
 			var fontFiles []string
@@ -150,7 +145,7 @@ func (t *dianaGroupRelationsTool) Run(ctx context.Context, input map[string]any)
 		// 两条路都断了才算失败，而且要把两边各自卡在哪说清楚——只说一句「画不出来」
 		// 的话，人不知道该去装字体还是装浏览器。
 		result := dianaGroupRelationsResult{
-			Message:      relationRenderFailureMessage(ctx, t.runtime.sandboxedBrowserEnabled(t.event), rasterErr, browserErr),
+			Message:      relationRenderFailureMessage(ctx, rasterErr, browserErr),
 			Range:        rangeID,
 			Participants: graph.Participants,
 			Messages:     graph.Messages,
@@ -185,25 +180,18 @@ func (t *dianaGroupRelationsTool) Run(ctx context.Context, input map[string]any)
 //
 // 所以先探一次活：探不到就照实说探测结果，探得到就承认浏览器在、是这次渲染没成，
 // 并把原始错误带上。
-func relationRenderFailureMessage(ctx context.Context, browserEnabled bool, rasterErr, browserErr error) string {
+func relationRenderFailureMessage(ctx context.Context, rasterErr, browserErr error) string {
 	browserDetail := strings.TrimSpace(firstLineOf(browserErr.Error()))
-	// 插件关着的时候不必去探测浏览器：装没装都不影响结论，探出来的那句话反而答非所问。
-	if browserEnabled {
-		if status := agent.ProbeHeadlessBrowser(ctx, ""); !status.Available {
-			if detail := strings.TrimSpace(status.Detail); detail != "" {
-				browserDetail = detail
-			}
+	if status := agent.ProbeHeadlessBrowser(ctx, ""); !status.Available {
+		if detail := strings.TrimSpace(status.Detail); detail != "" {
+			browserDetail = detail
 		}
 	}
 	if browserDetail == "" {
 		browserDetail = "浏览器没有产出图片"
 	}
-	fix := "装一个中文字体或一个 Chrome/Chromium 都能救。"
-	if !browserEnabled {
-		fix = "装一个中文字体，或者在插件页把「网页渲染」打开，都能救。"
-	}
 	return fmt.Sprintf("画不出来，两条路都没走通：直接渲染——%s；浏览器渲染——%s。%s",
-		firstLineOf(rasterErr.Error()), browserDetail, fix)
+		firstLineOf(rasterErr.Error()), browserDetail, "装一个中文字体或一个 Chrome/Chromium 都能救。")
 }
 
 // firstLineOf 只取错误的第一行：浏览器的报错常常拖着一整屏堆栈，群里发不下。

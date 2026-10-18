@@ -44,7 +44,7 @@ func TestWebSearchPluginIsBuiltInAndHonorsOverrides(t *testing.T) {
 		t.Fatalf("built-in state changed after lifecycle request: %#v", state)
 	}
 	// 显式停用工具不会由浏览器重新补上。
-	tools, err = manager.AgentToolsWithOverrides(map[string]bool{webSearchPluginID: false, sandboxedBrowserPluginID: false})
+	tools, err = manager.AgentToolsWithOverrides(map[string]bool{webSearchPluginID: false})
 	if err != nil || hasAgentToolNamed(tools, agent.WebSearchToolName) {
 		t.Fatalf("disabled override tools=%#v err=%v", tools, err)
 	}

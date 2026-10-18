@@ -188,7 +188,7 @@ func TestTrimRenderScreenshotKeepsBlankImage(t *testing.T) {
 // 出图要起一次无头浏览器，浏览器归「网页渲染」插件管。插件停用时这个工具
 // 不能绕过去自己起一个，也要把原因说清楚——只回一句「画不了」的话，
 // 人不知道该去开哪个开关。
-func TestRenderToolRefusesWhenBrowserPluginDisabled(t *testing.T) {
+func TestRenderToolRefusesWhenCoreBrowserUnavailable(t *testing.T) {
 	runtime := NewRuntime(BotConfig{BotAccount: "42"}, nilChannel{}, NewPluginManager(), nil, nil, nil, nil)
 	logs := &captureRelationLogs{}
 	runtime.SetAppLogWriter(logs)

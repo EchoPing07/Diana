@@ -2,9 +2,8 @@
 <!--
   机器人用到的浏览器全在这一页，按用途分两组：
 
-  - 读网页、出图：网页渲染。每次开一个全新的无头 Chrome，用完就扔，不带登录态，谁的
-    消息都能用。它本身是插件页里的「网页渲染」插件，这里放同一个开关，免得用户以为
-    浏览器只有下面那几个。
+  - 读网页、出图：Diana 内置的网页渲染。每次开一个全新的 Chrome，用完就扔，不带登录态，
+    谁的消息都能用。默认有头隐藏运行；没有可用显示环境时自动退回无头。
   - 登录、点按钮：Diana 内置和用户自己的 Chrome（扩展）做的是同一件事——带登录态、只有
     主人能驱动——区别只在用谁的。一行一个勾选框，可以都勾上并排优先级，排在上面的先用，
     它用不了时自动换另一个（见 model/browsersource）。外接 CDP 不参与排序：它是 browser_*
@@ -25,38 +24,20 @@
         </div>
         <div class="browser-toggle-list">
           <div class="browser-toggle-row">
-            <input
-              id="browser-source-render"
-              type="checkbox"
-              :checked="renderPlugin?.enabled"
-              :disabled="savingRender || !renderPlugin"
-              @change="toggleRender(($event.target as HTMLInputElement).checked)"
-            />
+            <span class="browser-toggle-spacer" aria-hidden="true"></span>
             <div class="browser-toggle-copy">
               <div class="browser-toggle-title">
-                <label for="browser-source-render">网页渲染</label>
-                <template v-if="renderPlugin?.enabled">
-                  <span v-if="dependencyProblem('render')" class="badge warn">没找到 Chrome</span>
-                  <span v-else class="badge ok">一直在用</span>
-                </template>
+                <span class="browser-toggle-label">网页渲染</span>
+                <span v-if="dependencyProblem('render')" class="badge warn">没找到 Chrome</span>
+                <span v-else class="badge ok">内置</span>
               </div>
               <p class="browser-toggle-desc">
-                每次开一个全新的 Chrome，用完就扔。群里发的链接自动读出来、模型查网页（browser_render）都靠它，默认有头、不容易被网站拦；HTML 转图片这类本地渲染用无头。
+                每次开一个全新的 Chrome，用完就扔。群里发的链接、模型查网页（browser_render）和 HTML/SVG 转图片都默认有头隐藏运行；没有可用显示环境时自动退回无头。浏览器未安装或启动失败时会明确报错。
               </p>
-              <div v-if="renderPlugin" class="browser-toggle-meta">
+              <div class="browser-toggle-meta">
                 <button type="button" :class="{ warn: dependencyProblem('render') }" @click="dependenciesTarget = 'render'">
                   运行依赖 {{ renderDependencies.filter((dep) => dep.available).length }}/{{ renderDependencies.length }}
                 </button>
-                <span class="browser-inline-select">
-                  <label for="browser-render-window">窗口</label>
-                  <AppSelect
-                    id="browser-render-window"
-                    :model-value="renderWindowMode"
-                    :options="renderWindowOptions"
-                    :disabled="savingRender"
-                    @update:model-value="setRenderWindowMode"
-                  />
-                </span>
               </div>
             </div>
           </div>
@@ -386,12 +367,10 @@
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref } from "vue";
 import { botScope } from "../lib/bot-scope";
 import { formatTime } from "../lib/format";
-import { pluginForBot } from "../lib/plugin-settings";
 import { navigate as navigateToView } from "../router";
 import { ArrowLeft, ArrowUp, ChevronDown, Globe, Lock, Maximize2, Minimize2, Plus, RotateCw, Search, UserRound, X } from "@lucide/vue";
 import AgentBrowserPanel from "../components/AgentBrowserPanel.vue";
 import ExternalCDPDialog from "../components/ExternalCDPDialog.vue";
-import AppSelect, { type AppSelectOption } from "../components/AppSelect.vue";
 import Modal from "../components/Modal.vue";
 import PluginDependencyList from "../components/PluginDependencyList.vue";
 import BrowserControlPanel from "../components/BrowserControlPanel.vue";
@@ -420,10 +399,6 @@ import {
   type BrowserBoxTab,
   getAgentBrowser,
   type AgentBrowserSettings,
-  listPlugins,
-  setPluginEnabled,
-  updatePluginSettings,
-  type PluginState
 } from "../api";
 import { toastError, toastSuccess } from "../lib/toast";
 import { askConfirm } from "../lib/confirm";
@@ -464,58 +439,16 @@ function dependencyProblem(key: SourceKey | "render"): boolean {
   return dependencies.some((dep) => !dep.available && dep.name !== "display");
 }
 
-// 网页渲染就是插件页的「网页渲染」插件，这里读写的是同一份开关和设置。
-const renderPluginID = "official.sandboxed-browser-renderer";
-const renderWindowModeKey = "window_mode";
-const renderPlugin = ref<PluginState | null>(null);
+// 网页渲染是内置能力，只在这里展示运行依赖，没有插件开关和窗口模式设置。
+const renderDependencyID = "core.browser-renderer";
 const renderDependencies = ref<ResolverDependency[]>([]);
-const savingRender = ref(false);
-const renderWindowSpec = computed(() => renderPlugin.value?.manifest.settings?.find((spec) => spec.key === renderWindowModeKey));
-// 选项来自插件清单，补一句各自什么时候用：「显示窗口」只在排查渲染问题时有用。
-const renderWindowHints: Record<string, string> = {
-  auto: "有头但看不见，不容易被网站拦；没条件时退回无头",
-  headless: "最省资源，但容易被网站认出来拦掉",
-  visible: "在跑 Diana 的机器上弹出窗口，排查用"
-};
-const renderWindowOptions = computed<AppSelectOption[]>(() =>
-  (renderWindowSpec.value?.options ?? []).map((option) => ({ ...option, hint: renderWindowHints[option.value] }))
-);
-const renderWindowMode = computed(() => String(renderPlugin.value?.settings?.[renderWindowModeKey] ?? renderWindowSpec.value?.default ?? "auto"));
 
 async function loadRender(refreshDependencies = false): Promise<void> {
   try {
-    const [plugins, dependencies] = await Promise.all([listPlugins(), listPluginDependencies(refreshDependencies)]);
-    const state = plugins.find((plugin) => plugin.manifest.id === renderPluginID);
-    renderPlugin.value = state ? pluginForBot(state, botID) : null;
-    renderDependencies.value = dependencies.plugins[renderPluginID] ?? [];
+    const dependencies = await listPluginDependencies(refreshDependencies);
+    renderDependencies.value = dependencies.plugins[renderDependencyID] ?? [];
   } catch {
     // 读不到只是这一行不显示状态，不打断这一页。
-  }
-}
-
-async function toggleRender(enabled: boolean): Promise<void> {
-  savingRender.value = true;
-  try {
-    renderPlugin.value = pluginForBot(await setPluginEnabled(renderPluginID, enabled, botID), botID);
-  } catch (err) {
-    toastError(err instanceof Error ? err.message : "切换网页渲染失败");
-    await loadRender();
-  } finally {
-    savingRender.value = false;
-  }
-}
-
-async function setRenderWindowMode(mode: string): Promise<void> {
-  if (!renderPlugin.value) return;
-  savingRender.value = true;
-  try {
-    const settings = { ...(renderPlugin.value.settings ?? {}), [renderWindowModeKey]: mode };
-    renderPlugin.value = pluginForBot(await updatePluginSettings(renderPluginID, settings), botID);
-  } catch (err) {
-    toastError(err instanceof Error ? err.message : "保存网页渲染设置失败");
-    await loadRender();
-  } finally {
-    savingRender.value = false;
   }
 }
 

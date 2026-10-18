@@ -78,7 +78,7 @@ func TestWarmBrowserDoesNotReuseDifferentActiveConfiguration(t *testing.T) {
 		{"window", "chrome", BrowserWindowHidden},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			session := &warmBrowserSession{executable: "chrome", root: context.Background(), process: &sandboxedChromeProcess{done: make(chan error)}}
+			session := &warmBrowserSession{executable: "chrome", requestedWindow: BrowserWindowHeadless, root: context.Background(), process: &sandboxedChromeProcess{done: make(chan error)}}
 			w := &warmBrowser{session: session, users: 1}
 			got, release, err := w.acquire(context.Background(), tc.executable, SandboxedBrowserConfig{Window: tc.window})
 			if err == nil || got != nil || release != nil || w.users != 1 {

@@ -72,8 +72,7 @@ func (f *finalizeRender) take() []byte {
 	return png
 }
 
-// offersRenderFinalizeField 只在这一轮真的画得出来时才给模型这个字段：render 工具挂上了、
-// 「网页渲染」插件开着。插件开关按群生效，同一个会话里字段集合保持稳定。
+// offersRenderFinalizeField 只在这一轮挂上 render 工具且内置网页渲染可用时给模型这个字段。
 func (r *Runtime) offersRenderFinalizeField(event MessageEvent, registry *agent.ToolRegistry) bool {
 	if registry == nil {
 		return false

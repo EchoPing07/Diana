@@ -54,9 +54,9 @@ func TestBrowserBoxToolsStayOwnerOnly(t *testing.T) {
 			t.Fatalf("%s 不该开给非主人：它连的是带登录态的常驻浏览器", name)
 		}
 	}
-	// 一次性无头那条例外：临时 profile、用完即删，不带任何登录态。
+	// 一次性隔离渲染例外：临时 profile、用完即删，不带任何登录态。
 	if !allowed["browser_render"] {
-		t.Fatal("browser_render 是一次性无头渲染，不该被一起挡掉")
+		t.Fatal("browser_render 是一次性隔离渲染，不该被一起挡掉")
 	}
 }
 

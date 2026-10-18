@@ -96,12 +96,12 @@ func TestLiveResearchPipeline(t *testing.T) {
 	if err := json.Unmarshal([]byte(os.Getenv("DIANA_LIVE_PLUGIN_STATES_JSON")), &pluginStates); err != nil || len(pluginStates) == 0 {
 		t.Fatal("requires actual persisted plugin settings; default settings are not a production replay")
 	}
-	for _, id := range []string{webSearchPluginID, sandboxedBrowserPluginID} {
+	for _, id := range []string{webSearchPluginID} {
 		if _, ok := pluginStates[id]; !ok {
 			t.Fatalf("missing actual persisted plugin state: %s", id)
 		}
 	}
-	plugins := NewPluginManager(NewWebSearchPlugin(nil), NewSandboxedBrowserRenderPlugin())
+	plugins := NewPluginManager(NewWebSearchPlugin(nil))
 	plugins.Restore(pluginStates)
 	_, searchSettings, enabled := plugins.PluginWithSettingsForProfile(webSearchPluginID, production.ID)
 	if !enabled {
@@ -137,6 +137,7 @@ func TestLiveResearchPipeline(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			tools = append(NewBuiltInBrowserRenderer().AgentTools(), tools...)
 			var steps []agent.Step
 			var mu sync.Mutex
 			var recorded []agent.Tool
@@ -365,7 +366,7 @@ func TestLiveSearchSubtaskProduction(t *testing.T) {
 	if err := json.Unmarshal([]byte(os.Getenv("DIANA_LIVE_PLUGIN_STATES_JSON")), &states); err != nil || len(states) == 0 {
 		t.Fatal("missing production plugin config")
 	}
-	plugins := NewPluginManager(NewWebSearchPlugin(nil), NewSandboxedBrowserRenderPlugin())
+	plugins := NewPluginManager(NewWebSearchPlugin(nil))
 	plugins.Restore(states)
 	cfg.ModelRoles = nil
 	rt := NewRuntime(cfg.WithDefaults(), &recordingChannel{}, plugins, nil, nil, nil, func() (LLMProvider, error) { return client, nil })

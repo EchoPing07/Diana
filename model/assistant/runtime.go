@@ -1781,17 +1781,10 @@ func (r *Runtime) groupConfigForEvent(event MessageEvent) (GroupConfig, bool) {
 	return groupCfg.WithDefaults(event.GroupID, base), true
 }
 
-// sandboxedBrowserEnabled 说明这个会话现在能不能起浏览器。
-//
-// 浏览器不是谁想用就自己去起的东西：它是「网页渲染」插件的运行依赖，装没装、装在
-// 哪、缺了怎么一键补，全挂在那个插件名下（见 browserDependencyGroup）。插件被停用
-// 就是「这台机器不许起浏览器」，任何要用浏览器的功能都得认这个开关，否则插件页上
-// 那个关掉的开关是假的。
+// sandboxedBrowserEnabled 说明这轮能否尝试使用内置的一次性浏览器。浏览器本身缺失时，
+// 具体调用会返回可诊断的依赖错误；这项核心能力不再受插件或群设置开关影响。
 func (r *Runtime) sandboxedBrowserEnabled(event MessageEvent) bool {
-	if r == nil || r.plugins == nil {
-		return false
-	}
-	return r.plugins.EnabledWithOverrides(sandboxedBrowserPluginID, r.pluginOverridesForEvent(event))
+	return r != nil && r.plugins != nil && r.plugins.builtInBrowser
 }
 
 // replyLinkPolicy 决定联网结论要不要在回复正文里给出 URL。
@@ -3939,7 +3932,7 @@ func (r *Runtime) replyTo(ctx context.Context, event MessageEvent, text string) 
 			RecallEvents:            recallEvents,
 			Text:                    cleanText,
 			OwnerID:                 cfg.OwnerIDForEvent(event),
-			SandboxedBrowserEnabled: r.plugins.EnabledWithOverrides(sandboxedBrowserPluginID, overrides),
+			SandboxedBrowserEnabled: r.sandboxedBrowserEnabled(current),
 			Channel:                 r.channel,
 			LLMStore:                r.llmStore,
 			LLMModelLister:          r.llmModelLister(),
@@ -3974,7 +3967,28 @@ func (r *Runtime) replyTo(ctx context.Context, event MessageEvent, text string) 
 			overrides = r.pluginOverridesForEvent(event)
 			settingOverrides = r.pluginSettingOverridesForEvent(event)
 		}
-		pluginResponses = r.plugins.RunWithGroupOverrides(ctx, pluginRequest(event, replyHistory), overrides, settingOverrides)
+		request := pluginRequest(event, replyHistory)
+		var browserResult chan *PluginResponse
+		if r.plugins != nil && r.plugins.builtInBrowser {
+			browserResult = make(chan *PluginResponse, 1)
+			go func() {
+				var result *PluginResponse
+				defer func() { browserResult <- result }()
+				defer recoverGoroutinePanic("runtime.builtInBrowserRenderer")
+				resp, err := NewBuiltInBrowserRenderer().Handle(ctx, request)
+				if err != nil {
+					log.Printf("diana built-in browser renderer: %v", err)
+					return
+				}
+				result = resp
+			}()
+		}
+		pluginResponses = r.plugins.RunWithGroupOverrides(ctx, request, overrides, settingOverrides)
+		if browserResult != nil {
+			if resp := <-browserResult; resp != nil && resp.Handled {
+				pluginResponses = append(pluginResponses, *resp)
+			}
+		}
 	}
 	pluginResponses = applyRecallReplyMode(pluginResponses, cfg.RecallReplyMode)
 	authoritativePluginContext := hasAuthoritativePluginContext(pluginResponses)

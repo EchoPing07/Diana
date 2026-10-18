@@ -111,7 +111,7 @@ func TestReplyFinalizeRenderFailureFallsBackToText(t *testing.T) {
 }
 
 // 「网页渲染」插件关着时画不出来，就不给模型这个字段。
-func TestReplyFinalizeRenderFieldNeedsBrowserPlugin(t *testing.T) {
+func TestReplyFinalizeRenderFieldNeedsCoreBrowser(t *testing.T) {
 	withFastSendTiming(t)
 	rendered := stubFinalizeRenderPNG(t, []byte("png"), nil)
 	provider := &renderFinalizeLLMProvider{capturingLLMProvider: capturingLLMProvider{reply: "好的"}, table: renderFinalizeTestTable}

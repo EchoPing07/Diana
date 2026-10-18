@@ -69,7 +69,7 @@ func (t *dianaLocalAttachmentTool) Description() string {
 		return "查看 Agent 工作目录里的图片，画面作为附件交给下一轮模型。文件名不能当画面证据；读取成功不代表已发到聊天。"
 	}
 	// 「存进工作目录不等于用户收到」是事故规则：模型存好文件就宣称已发送。svg 需要
-	// 「网页渲染」插件、可执行文件拒发、超限发缩放版，这些都由 Run 的报错或结果说明。
+	// 内置网页渲染、可执行文件拒发、超限发缩放版，这些都由 Run 的报错或结果说明。
 	return "把 Agent 工作目录里的文件发到当前会话，仅主人。存进工作目录不等于用户收到，交付要调本工具。聊天图片、网上文件先用 save_to_workspace 存进来；描述图片前先用 view_image 看。"
 }
 
@@ -220,7 +220,7 @@ func localImageFitsPlatform(platform string, data []byte) bool {
 // viewSVGImage 把 SVG 栅格化成 PNG 交给模型看，和 send_attachment 发 SVG 走同一条路。
 func (t *dianaLocalAttachmentTool) viewSVGImage(ctx context.Context, data []byte) (string, error) {
 	if t.runtime == nil || !t.runtime.sandboxedBrowserEnabled(t.event) {
-		return "", fmt.Errorf("svg 要先栅格化成 PNG 才能看，但「网页渲染」插件没有启用；可以用 read_file 读 SVG 源码")
+		return "", fmt.Errorf("svg 要先栅格化成 PNG 才能看，但内置网页渲染不可用；可以用 read_file 读 SVG 源码")
 	}
 	png, err := t.runtime.renderContentPNG(ctx, t.event, renderFormatSVG, string(data), "")
 	if err != nil {
@@ -240,7 +240,7 @@ func (t *dianaLocalAttachmentTool) viewSVGImage(ctx context.Context, data []byte
 // 数据已经整体读进内存，命令进程在截图期间改不了它。
 func (t *dianaLocalAttachmentTool) sendSVGImage(ctx context.Context, data []byte) (string, error) {
 	if t.runtime == nil || !t.runtime.sandboxedBrowserEnabled(t.event) {
-		return "", fmt.Errorf("svg 作为图片发送需要先栅格化成 PNG，但「网页渲染」插件没有启用；可以改用 mode=file 直接发送原始 SVG 文件")
+		return "", fmt.Errorf("svg 作为图片发送需要先栅格化成 PNG，但内置网页渲染不可用；可以改用 mode=file 直接发送原始 SVG 文件")
 	}
 	png, err := t.runtime.renderContentPNG(ctx, t.event, renderFormatSVG, string(data), "")
 	if err != nil {

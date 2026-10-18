@@ -127,7 +127,7 @@ func (t *dianaRenderMediaTool) Run(ctx context.Context, input map[string]any) (s
 	}
 	result := dianaRenderMediaResult{Format: spec.format, Output: spec.output}
 	if !t.runtime.sandboxedBrowserEnabled(t.event) {
-		result.Message = "「网页渲染」插件没有启用，渲染不了。"
+		result.Message = "内置网页渲染不可用，渲染不了。"
 		return t.fail(ctx, result, "")
 	}
 	ffmpeg := ""

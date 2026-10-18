@@ -392,9 +392,10 @@ type SecretSettingMerger interface {
 }
 
 type PluginManager struct {
-	mu      sync.RWMutex
-	catalog map[string]Plugin
-	states  map[string]PluginState
+	mu             sync.RWMutex
+	catalog        map[string]Plugin
+	states         map[string]PluginState
+	builtInBrowser bool
 }
 
 var (
@@ -406,7 +407,6 @@ var (
 const (
 	resolverPluginID         = "official.nonebot-plugin-resolver-go"
 	messageHistoryPluginID   = "official.message-history"
-	sandboxedBrowserPluginID = "official.sandboxed-browser-renderer"
 	sandboxedBrowserToolName = "browser_render"
 	pluginSettingAskAgent    = "ask_agent"
 )
@@ -440,7 +440,6 @@ func NewDefaultPluginManager() *PluginManager {
 		NewFileParserPlugin(nil),
 		NewLLMConfigPlugin(),
 		NewPlatformInterfacePlugin(),
-		NewSandboxedBrowserRenderPlugin(),
 		NewVoiceTTSPlugin(nil),
 		NewVoiceSTTPlugin(nil),
 		NewMusicPlugin(nil),
@@ -459,6 +458,7 @@ func NewDefaultPluginManager() *PluginManager {
 		NewStatusCommandPlugin(),
 		capabilities,
 	)
+	manager.builtInBrowser = true
 	capabilities.setPluginStateProvider(manager.List)
 	return manager
 }

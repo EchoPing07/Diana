@@ -108,7 +108,7 @@ func TestLocalAttachmentRejectsUnsupportedTypes(t *testing.T) {
 	}
 }
 
-func TestLocalAttachmentSVGImageModeNeedsBrowserPlugin(t *testing.T) {
+func TestLocalAttachmentSVGImageModeNeedsCoreBrowser(t *testing.T) {
 	t.Setenv("APP_DB_PATH", filepath.Join(t.TempDir(), "diana.db"))
 	root := AgentWorkspaceDir()
 	if err := os.MkdirAll(root, 0700); err != nil {
@@ -128,7 +128,7 @@ func TestLocalAttachmentSVGImageModeNeedsBrowserPlugin(t *testing.T) {
 	tool := &dianaLocalAttachmentTool{runtime: r, event: MessageEvent{Platform: PlatformTelegram, Kind: EventKindGroup, GroupID: "-100123"}}
 	_, err := tool.Run(context.Background(), map[string]any{"path": "chart.svg", "mode": "image"})
 	if err == nil {
-		t.Fatal("svg image send without browser plugin accepted")
+		t.Fatal("svg image send without core browser accepted")
 	}
 	if !strings.Contains(err.Error(), "mode=file") {
 		t.Fatalf("error should point to mode=file, got: %v", err)

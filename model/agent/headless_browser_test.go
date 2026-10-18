@@ -54,7 +54,10 @@ func TestSandboxedChromeArgsKeepChromeSandboxEnabled(t *testing.T) {
 	if strings.Contains(joined, "--no-sandbox") {
 		t.Fatalf("args disable Chrome sandbox: %s", joined)
 	}
-	for _, want := range []string{"--headless=new", "--remote-debugging-port=0", "--user-data-dir=/tmp/profile", "--disable-extensions"} {
+	if strings.Contains(joined, "--headless") {
+		t.Fatalf("default browser should be headed: %s", joined)
+	}
+	for _, want := range []string{"--no-startup-window", "--remote-debugging-port=0", "--user-data-dir=/tmp/profile", "--disable-extensions"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("args missing %q: %s", want, joined)
 		}
@@ -385,9 +388,12 @@ func TestBothBrowserPathsShareSandboxHardening(t *testing.T) {
 		}
 	}
 
-	// CDP 那条路是在底座上追加自己的参数，不是另起一份。
+	// CDP 那条路是在同一底座上切换为有头参数并追加远程调试端口。
 	cdp := sandboxedChromeArgs("/tmp/p", "/tmp/c", "/tmp/x", SandboxedBrowserConfig{})
 	for _, arg := range base {
+		if arg == "--headless=new" {
+			continue
+		}
 		if !slices.Contains(cdp, arg) {
 			t.Fatalf("CDP 参数丢了底座里的 %q", arg)
 		}
@@ -608,15 +614,15 @@ func TestStaticPageDoesNotWaitOutTheObservationWindow(t *testing.T) {
 }
 
 // 读网页的有头模式不开启动窗口（macOS 上一开窗口就抢前台），页面另在后台开；
-// 本地渲染用的默认配置仍是无头。
+// 本地渲染也使用同一份默认有头配置。
 func TestHiddenWindowArgsSkipStartupWindow(t *testing.T) {
 	hidden := strings.Join(sandboxedChromeArgsForWindow("/tmp/p", "/tmp/c", "/tmp/x", BrowserWindowHidden), " ")
 	if strings.Contains(hidden, "--headless") || !strings.Contains(hidden, "--no-startup-window") {
 		t.Fatalf("有头隐藏模式参数不对：%s", hidden)
 	}
-	headless := strings.Join(sandboxedChromeArgs("/tmp/p", "/tmp/c", "/tmp/x", SandboxedBrowserConfig{}), " ")
-	if !strings.Contains(headless, "--headless=new") || strings.Contains(headless, "--no-startup-window") {
-		t.Fatalf("默认应当还是无头：%s", headless)
+	defaultArgs := strings.Join(sandboxedChromeArgs("/tmp/p", "/tmp/c", "/tmp/x", SandboxedBrowserConfig{}), " ")
+	if strings.Contains(defaultArgs, "--headless=new") || !strings.Contains(defaultArgs, "--no-startup-window") {
+		t.Fatalf("默认应当有头隐藏：%s", defaultArgs)
 	}
 	if window, env := resolveBrowserWindow(BrowserWindowHeadless); window != BrowserWindowHeadless || env != nil {
 		t.Fatalf("无头不该去找屏幕：%q %v", window, env)

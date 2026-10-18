@@ -258,18 +258,6 @@ let plugins: PluginState[] = [
     manifest: { id: "official.rss-watch", name: "RSS 订阅", version: "0.2.0", description: "按条件监控 RSS 或社交动态，一条订阅可同时盯多个账号或 Feed，判断后发送到指定群聊或私聊。", official: true, built_in: true, permissions: ["网络请求", "消息发送"], settings: [{ key: "default_interval_seconds", label: "默认检查周期", type: "number", default: 300, min: 30, max: 86400, unit: "秒" }, { key: "failure_alert_threshold", label: "连续失败几次才报", description: "订阅连着失败到这个次数才在聊天里说一声，一轮故障只报一次，恢复后再说一声好了。报不报看下面的「发送错误通知」和机器人配置里的「出错时在聊天里提示」，任一关着都不报。", type: "number", default: 5, min: 1, max: 100, step: 1, unit: "次" }, { key: "error_notice", label: "发送错误通知", description: "这个插件失败时是否在聊天里说明。关掉后失败仍然记入事件和日志，只是不再打扰聊天。机器人的「错误提示」关掉时，这里开着也不会发。", type: "bool", default: true }] },
     installed: true, enabled: true
   },
-  {
-    manifest: {
-      id: "official.sandboxed-browser-renderer", name: "网页渲染", version: "0.3.1",
-      description: "使用 Chromium / Google Chrome，在一次性隔离配置中执行动态网页。",
-      official: true, built_in: true, permissions: ["网页渲染", "隔离浏览器"],
-      settings: [{
-        key: "window_mode", label: "Chrome 窗口模式", type: "select", default: "auto",
-        options: [{ value: "auto", label: "自动（推荐）" }, { value: "headless", label: "始终无头" }, { value: "visible", label: "显示窗口（排查用）" }]
-      }]
-    },
-    installed: true, enabled: true
-  },
   { manifest: { id: "official.status-command", name: "状态查询", version: "0.1.0", description: "群里或私聊发一条 #diana（整条消息只有这一个词）就回一张运行状态卡片：版本、平台、已运行时长。不经过模型，回复固定且立刻返回，用来确认机器人还活着。默认关闭。", official: true, built_in: true, default_disabled: true, permissions: ["message:read", "message:send"] }, installed: true, enabled: false }
 ];
 
@@ -376,7 +364,7 @@ const demoGroupAvatar = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(`
 const groups: BotGroupSummary[] = [
   { group_id: "100200301", group_name: "产品讨论（演示）", avatar_url: demoGroupAvatar, member_count: 186, max_member_count: 500, enabled: true, configured: true, joined: true, group_triggers: ["Diana", "diana"], system_prompt: "以准确、简洁的方式参与产品和工程讨论。", recent_context_limit: 50, model_call_quota: 400, image_generation_daily_group_limit: 50, video_generation_daily_group_limit: 0, quota_call_limit: 400, quota_calls_used: 168, proactive_reply_chance: 1, proactive_reply_threshold: 0.9, reply_gate: { active_hours_enabled: true, active_start: "08:00", active_end: "23:30", timezone: "Asia/Shanghai", blocked_users: ["100200999"], owner_bypass: true }, plugin_overrides: { "official.repository-watch": true }, updated_at: before(12) },
   { group_id: "100200418", group_name: "日常交流（演示）", avatar_url: demoGroupAvatar, member_count: 74, max_member_count: 200, enabled: true, configured: true, joined: true, group_triggers: ["Diana"], system_prompt: "自然参与闲聊，事实不确定时优先搜索。", recent_context_limit: 40, quota_call_limit: 400, quota_calls_used: 400, proactive_reply_chance: 1, proactive_reply_threshold: 0.9, plugin_overrides: {}, updated_at: before(28) },
-  { group_id: "100200519", group_name: "设计讨论（演示）", avatar_url: demoGroupAvatar, member_count: 52, max_member_count: 200, enabled: true, configured: true, joined: true, group_triggers: ["画一张", "Diana"], system_prompt: "优先理解视觉需求，并在生图前补齐必要约束。", reply_gate: { active_hours_enabled: true, active_start: "09:00", active_end: "22:00", timezone: "Asia/Shanghai", blocked_users: ["100200888", "100200889"] }, plugin_overrides: { "official.sandboxed-browser-renderer": false }, updated_at: before(45) },
+  { group_id: "100200519", group_name: "设计讨论（演示）", avatar_url: demoGroupAvatar, member_count: 52, max_member_count: 200, enabled: true, configured: true, joined: true, group_triggers: ["画一张", "Diana"], system_prompt: "优先理解视觉需求，并在生图前补齐必要约束。", reply_gate: { active_hours_enabled: true, active_start: "09:00", active_end: "22:00", timezone: "Asia/Shanghai", blocked_users: ["100200888", "100200889"] }, updated_at: before(45) },
   { group_id: "100200627", group_name: "只读观察群（演示）", avatar_url: demoGroupAvatar, member_count: 318, max_member_count: 500, enabled: false, configured: true, joined: true, group_triggers: [], system_prompt: "仅记录事件，不主动回复。", plugin_overrides: {}, updated_at: before(90) }
 ];
 
@@ -901,10 +889,9 @@ const residencyEntries: AgentResidencyEntry[] = [
   {id: "tool:bot_config", kind: "tool", name: "bot_config", description: "读取或修改 Diana 的相关度、闲聊门槛及闲聊冷却。get 读取，update 局部修改。", detail: "读取或修改 Diana 的相关度、闲聊门槛及闲聊冷却。get 读取，update 局部修改；scope=group 只改当前群（主人或实时核验的群管理员），scope=bot 仅主人修改当前机器人。关闭所有主动接话同时设置 relevance=0 与 idle_chat=off。input: {action: \"get\"|\"update\", scope?: \"group\"|\"bot\"}", default: true, resident_tokens: 588, deferred_tokens: 38},
   {id: "tool:browser_click", kind: "tool", name: "browser_click", description: "点击当前页面中的元素。", detail: "点击当前页面中的元素。input: {selector: string}", default: false, resident_tokens: 96, deferred_tokens: 14},
   {id: "tool:web_search", kind: "tool", name: "web_search", description: "联网搜索，返回标题、摘要和链接。", detail: "联网搜索，返回标题、摘要和链接。input: {query: string, limit?: number}", default: true, resident_tokens: 168, deferred_tokens: 18},
-  {id: "official.sandboxed-browser-renderer", kind: "plugin", name: "浏览器渲染", description: "把网页渲染成图片交给模型看，跑在沙盒里。", detail: "把网页渲染成图片交给模型看，跑在沙盒里。", tools: ["browser_render", "browser_open", "browser_text"], default: true, resident_tokens: 486, deferred_tokens: 58},
-  {id: "tool:browser_render", kind: "tool", parent: "official.sandboxed-browser-renderer", name: "browser_render", description: "渲染网页为图片。", detail: "渲染网页为图片。input: {url: string, full_page?: boolean}", default: true, resident_tokens: 280, deferred_tokens: 20},
-  {id: "tool:browser_open", kind: "tool", parent: "official.sandboxed-browser-renderer", name: "browser_open", description: "通过 Chrome DevTools Protocol 打开网页。需要 Chrome 启用 remote debugging。", detail: "通过 Chrome DevTools Protocol 打开网页。需要 Chrome 启用 remote debugging。input: {url: string}", default: false, resident_tokens: 132, deferred_tokens: 26},
-  {id: "tool:browser_text", kind: "tool", parent: "official.sandboxed-browser-renderer", name: "browser_text", description: "读取当前浏览器页面文本。", detail: "读取当前浏览器页面文本。input: {}", default: false, resident_tokens: 74, deferred_tokens: 12},
+  {id: "tool:browser_render", kind: "tool", name: "browser_render", description: "渲染网页为图片。", detail: "渲染网页为图片。input: {url: string, full_page?: boolean}", default: true, resident_tokens: 280, deferred_tokens: 20},
+  {id: "tool:browser_open", kind: "tool", name: "browser_open", description: "通过 Chrome DevTools Protocol 打开网页。需要 Chrome 启用 remote debugging。", detail: "通过 Chrome DevTools Protocol 打开网页。需要 Chrome 启用 remote debugging。input: {url: string}", default: false, resident_tokens: 132, deferred_tokens: 26},
+  {id: "tool:browser_text", kind: "tool", name: "browser_text", description: "读取当前浏览器页面文本。", detail: "读取当前浏览器页面文本。input: {}", default: false, resident_tokens: 74, deferred_tokens: 12},
   {id: "official.music", kind: "plugin", name: "音乐增强", description: "群里丢来的歌变成语音，也支持点歌。", detail: "群里丢来的歌变成语音，也支持点歌。", tools: ["music"], default: false, resident_tokens: 356, deferred_tokens: 34},
   {id: "tool:music", kind: "tool", parent: "official.music", name: "music", description: "按描述点一首歌并发成语音。", detail: "按描述点一首歌并发成语音。input: {query: string}", default: false, resident_tokens: 356, deferred_tokens: 34},
   {id: "mcp:gitea", kind: "mcp", name: "gitea", description: "自建 Gitea 的仓库、议题和合并请求。", detail: "自建 Gitea 的仓库、议题和合并请求。", tools: ["gitea_issue", "gitea_repo", "gitea_pull"], default: false, resident_tokens: 1_240, deferred_tokens: 96},
@@ -1599,7 +1586,7 @@ async function demoFetch(input: RequestInfo | URL, init?: RequestInit): Promise<
       resolver: dependencies,
       plugins: {
         "official.nonebot-plugin-resolver-go": dependencies,
-        "official.sandboxed-browser-renderer": browserDependencies
+        "core.browser-renderer": browserDependencies
       }
     });
   if (path.startsWith("/api/assistant/plugins/dependencies/") && path.endsWith("/install")) return json({ dependency: dependencies[0], resolver: dependencies });

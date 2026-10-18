@@ -8,7 +8,7 @@
     <p v-if="loading">正在读取…</p>
     <template v-else-if="!botScope"><p class="hint">先在顶部选一个机器人。</p></template>
     <template v-else-if="!loadError">
-      <p class="note">主人使用配置的内置浏览器或 CDP。指定用户使用各自独立的浏览器，只能操作白名单网站，不会连接主人的浏览器。公开网页由「网页渲染」插件使用临时浏览器访问。</p>
+      <p class="note">主人使用配置的内置浏览器或 CDP。指定用户使用各自独立的浏览器，只能操作白名单网站，不会连接主人的浏览器。公开网页由内置网页渲染使用临时浏览器访问。</p>
       <p v-if="untestedPlatform" class="note warn-text">{{ untestedPlatform }} 上的个人浏览器还没实测过，用户 ID 匹配和私聊判断可能有出入。目前实测过 QQ（OneBot v11）、QQ 官方机器人和 Telegram。</p>
       <div class="browser-form">
         <div class="field">
@@ -50,7 +50,7 @@
           <span class="hint">必填。精确匹配域名（可带端口），不包含子域名；不填协议、路径或通配符。嵌入页面也必须在授权范围内。</span>
         </div>
       </div>
-      <p class="note">公共网页截图通过「网页渲染」插件提供，使用独立临时浏览器，不带登录态，不受此处登录浏览器截图权限影响。</p>
+      <p class="note">公共网页截图由内置网页渲染提供，使用独立临时浏览器，不带登录态，不受此处登录浏览器截图权限影响。</p>
       <p v-if="screenshotAccess.mode === 'whitelist'" class="note">截图权限与操作权限分别设置。普通用户可查看和向当前私聊发送自己的登录页面；仅授权截图不能接入主人的浏览器，也不授予本地文件工具。</p>
       <p class="note">浏览器工具：{{ tools.join('、') }}。个人浏览器在首次操作时启动。</p>
       <div class="view-actions browser-actions">

@@ -93,10 +93,9 @@ func (t *dianaRenderTool) Run(ctx context.Context, input map[string]any) (string
 		// 截断了再画只会得到一张半截图，不如直接说清楚让模型自己拆。
 		return t.fail(ctx, format, fmt.Sprintf("内容超过 %d 字，画不下；拆成几张或者精简一下。", renderImageMaxContent), "")
 	}
-	// 出图要起一次无头浏览器，浏览器归「网页渲染」插件管。那个插件停用就是不许
-	// 起浏览器，这里不能绕过去自己起一个。
+	// 出图使用内置的一次性隔离浏览器。
 	if !t.runtime.sandboxedBrowserEnabled(t.event) {
-		return t.fail(ctx, format, "「网页渲染」插件没有启用，画不了图。", "")
+		return t.fail(ctx, format, "内置网页渲染不可用，画不了图。", "")
 	}
 
 	page, err := buildRenderPage(format, content, title)
@@ -134,7 +133,7 @@ func (t *dianaRenderTool) Run(ctx context.Context, input map[string]any) (string
 }
 
 // renderContentPNG 用 render 工具同一套页面构造、净化和截图链把内容画成 PNG。
-// 调用方负责先确认「网页渲染」插件已启用。
+// 调用方负责先确认内置网页渲染可用。
 func (r *Runtime) renderContentPNG(ctx context.Context, event MessageEvent, format, content, title string) ([]byte, error) {
 	page, err := buildRenderPage(format, content, title)
 	if err != nil {

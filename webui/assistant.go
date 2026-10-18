@@ -1252,9 +1252,9 @@ func (h *BotHandler) pluginDependencies(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"plugins": gin.H{
-			assistant.ResolverPluginID:         resolver,
-			assistant.SandboxedBrowserPluginID: browser,
-			assistant.GroupRelationsPluginID:   assistant.RelationRenderDependencies(browser),
+			assistant.ResolverPluginID:            resolver,
+			assistant.BrowserRendererDependencyID: browser,
+			assistant.GroupRelationsPluginID:      assistant.RelationRenderDependencies(browser),
 		},
 	})
 }

@@ -60,9 +60,9 @@ func TestFileDeliverySendsGeneratedFile(t *testing.T) {
 	if !result.OK || result.Filename != "main.go" || result.Bytes != len(source) {
 		t.Fatalf("unexpected result: %+v", result)
 	}
-	// 测试环境没启用「网页渲染」，预览应跳过但文件照发。
+	// 这个精简测试运行时没有初始化内置浏览器服务，预览应跳过但文件照发。
 	if !strings.HasPrefix(result.Preview, "skipped") {
-		t.Fatalf("preview should be skipped without browser plugin, got %q", result.Preview)
+		t.Fatalf("preview should be skipped without core browser, got %q", result.Preview)
 	}
 	if len(*uploads) != 1 {
 		t.Fatalf("expected one upload, got %d", len(*uploads))

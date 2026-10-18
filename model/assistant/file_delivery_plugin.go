@@ -57,7 +57,7 @@ func (p *FileDeliveryPlugin) Manifest() PluginManifest {
 		ID:          fileDeliveryPluginID,
 		Name:        "文件交付",
 		Version:     "0.1.1",
-		Description: "启用内置 Agent 后，模型可以把写好的代码、SVG、Markdown、配置等文本内容直接打包成文件发到会话供下载，不需要命令工具或工作目录。SVG、Mermaid、Markdown、HTML 和代码可附带一张渲染预览图；HTML 页面和 SVG 还能直接渲染成图片、MP4 视频或 GIF 发出（渲染需启用「网页渲染」插件，视频和 GIF 需要 ffmpeg）。",
+		Description: "启用内置 Agent 后，模型可以把写好的代码、SVG、Markdown、配置等文本内容直接打包成文件发到会话供下载，不需要命令工具或工作目录。SVG、Mermaid、Markdown、HTML 和代码可附带一张渲染预览图；HTML 页面和 SVG 还能直接渲染成图片、MP4 视频或 GIF 发出（渲染使用内置浏览器，视频和 GIF 需要 ffmpeg）。",
 		Official:    true,
 		BuiltIn:     true,
 		Permissions: []string{"message:send", "file:send", "browser:render"},
@@ -88,7 +88,7 @@ func (p *FileDeliveryPlugin) Manifest() PluginManifest {
 			{
 				Key:         fileDeliverySettingRenderMedia,
 				Label:       "HTML/动画渲染",
-				Description: "允许模型把 HTML 页面或 SVG 渲染成图片、视频或 GIF 发出。页面可以运行脚本，但在断网的无头浏览器里执行，读不到本机文件。",
+				Description: "允许模型把 HTML 页面或 SVG 渲染成图片、视频或 GIF 发出。页面可以运行脚本，但在断网的一次性隔离浏览器里执行，读不到本机文件。",
 				Type:        PluginSettingTypeBool,
 				Default:     true,
 			},
@@ -198,7 +198,7 @@ func (t *dianaFileDeliveryTool) sendPreview(ctx context.Context, name, content s
 		return fmt.Sprintf("skipped: 内容超过 %d 字，只发文件", renderImageMaxContent)
 	}
 	if !t.runtime.sandboxedBrowserEnabled(t.event) {
-		return "skipped: 「网页渲染」插件没有启用"
+		return "skipped: 内置网页渲染不可用"
 	}
 	png, err := t.runtime.renderContentPNG(ctx, t.event, format, source, "")
 	if err != nil {
@@ -212,7 +212,7 @@ func (t *dianaFileDeliveryTool) sendPreview(ctx context.Context, name, content s
 
 func (t *dianaFileDeliveryTool) sendHTMLPreview(ctx context.Context, content string) string {
 	if !t.runtime.sandboxedBrowserEnabled(t.event) {
-		return "skipped: 「网页渲染」插件没有启用"
+		return "skipped: 内置网页渲染不可用"
 	}
 	request, err := buildRenderMediaRequest(ctx, renderMediaSpec{format: renderMediaFormatHTML, output: renderMediaOutputImage, content: content, width: renderMediaDefaultSizes[renderMediaOutputImage].width})
 	if err != nil {

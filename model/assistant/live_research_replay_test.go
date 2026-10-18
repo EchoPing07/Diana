@@ -187,10 +187,7 @@ func TestLiveOnlineResearchReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	browser, err := NewSandboxedBrowserRenderPlugin().AgentTools(settings[sandboxedBrowserPluginID])
-	if err != nil {
-		t.Fatal(err)
-	}
+	browser := NewBuiltInBrowserRenderer().AgentTools()
 	var originals []string
 	tools := append(search, browser...)
 	for index, tool := range tools {

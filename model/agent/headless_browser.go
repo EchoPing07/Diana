@@ -173,20 +173,18 @@ func (r *earlyRenderReadiness) observe(now time.Time, probe browserDOMProbe, act
 type BrowserWindow string
 
 const (
-	// BrowserWindowHeadless 是默认：无头。HTML 出图、截图这些只渲染本地内容的场景
-	// 不会被任何网站风控，无头省资源也最稳。
-	BrowserWindowHeadless BrowserWindow = ""
-	// BrowserWindowHidden 是有头但看不见：窗口开在屏幕外面（Linux 容器里开在 Xvfb
-	// 虚拟屏上），也不抢前台。读网页、搜索用它——无头模式在渲染、GPU、屏幕尺寸这些
-	// 细节上会被网站认出来，搜索引擎和不少站点因此拦截或返回空结果。
-	BrowserWindowHidden BrowserWindow = "hidden"
+	// BrowserWindowHidden 是默认：有头但看不见。窗口开在屏幕外面（Linux 容器里开在
+	// Xvfb 虚拟屏上），也不抢前台。凑不出显示环境时才自动回退无头。
+	BrowserWindowHidden BrowserWindow = ""
+	// BrowserWindowHeadless 只用于显示环境不可用后的自动回退。
+	BrowserWindowHeadless BrowserWindow = "headless"
 	// BrowserWindowVisible 是有头而且看得见，排查渲染问题用。
 	BrowserWindowVisible BrowserWindow = "visible"
 )
 
 type SandboxedBrowserConfig struct {
 	Executable string
-	// Window 决定开不开窗口，默认无头。有头需要一块屏幕，这台机器凑不出来（Linux
+	// Window 决定开不开窗口，默认有头隐藏。有头需要一块屏幕，这台机器凑不出来（Linux
 	// 上既没有图形会话也没装 Xvfb，比如 slim 镜像）时退回无头。每次仍是一次性的
 	// 隔离 Profile。
 	Window            BrowserWindow
@@ -200,6 +198,8 @@ type SandboxedBrowserConfig struct {
 	// ReuseProcess 让渲染复用一个常驻浏览器进程，每次在隐身上下文里打开页面，
 	// 省掉每次启动 Chrome 的时间。只给搜索结果页用；起不来时退回一次性浏览器。
 	ReuseProcess bool
+	// ExtraArgs are trusted, caller-owned Chrome flags for specialized local rendering paths.
+	ExtraArgs []string
 }
 
 // SandboxedHeadlessBrowser starts a fresh Chrome/Chromium profile for every render.
@@ -618,6 +618,9 @@ func sandboxedChromeBaseArgsForMode(profileDir, cacheDir, crashDir string, headl
 		"--password-store=basic",
 		"--use-mock-keychain",
 		"--hide-scrollbars",
+		// 有头模式会继承宿主显示器的 ICC 色彩配置；固定 sRGB，网页截图和 SVG/HTML
+		// 转 PNG 才不会因运行机器不同而偏色。
+		"--force-color-profile=srgb",
 		// 对外只有一个身份：跟 HTTP 抓取那条路共用同一个 UA 和语言偏好。不设的话
 		// UA 里直接写着 HeadlessChrome，同一个站两条路会看到两个访客。
 		"--user-agent=" + BrowserUserAgent,

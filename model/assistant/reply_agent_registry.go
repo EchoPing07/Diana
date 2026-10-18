@@ -27,6 +27,9 @@ func (r *Runtime) newReplyAgentRegistry(ctx context.Context, cfg BotConfig, even
 			return nil, pluginToolsErr
 		}
 	}
+	if r.plugins != nil && r.plugins.builtInBrowser {
+		pluginTools = append(NewBuiltInBrowserRenderer().AgentTools(), pluginTools...)
+	}
 	for index, tool := range pluginTools {
 		pluginTools[index] = capabilityToolForConfig(tool, cfg)
 	}

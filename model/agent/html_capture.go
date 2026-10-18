@@ -20,6 +20,7 @@ import (
 	"github.com/chromedp/cdproto/network"
 	cdppage "github.com/chromedp/cdproto/page"
 	cdpruntime "github.com/chromedp/cdproto/runtime"
+	"github.com/chromedp/cdproto/target"
 	"github.com/chromedp/chromedp"
 )
 
@@ -188,14 +189,22 @@ func withHTMLCaptureSession(ctx context.Context, req HTMLCaptureRequest, run fun
 	ctx, cancel := context.WithTimeout(ctx, req.Timeout)
 	defer cancel()
 
-	process, err := launchChromeProcess(ctx, executable, dirs.root, htmlCaptureChromeArgs(dirs.profile, dirs.cache, dirs.crash))
+	process, err := launchSandboxedChrome(ctx, executable, dirs.root, dirs.profile, dirs.cache, dirs.crash, SandboxedBrowserConfig{Window: BrowserWindowHidden, ExtraArgs: htmlCaptureExtraArgs()})
 	if err != nil {
 		return err
 	}
 	defer process.stop()
 	allocator, cancelAllocator := chromedp.NewRemoteAllocator(ctx, process.wsURL, chromedp.NoModifyURL)
 	defer cancelAllocator()
-	browser, cancelBrowser := chromedp.NewContext(allocator)
+	var contextOptions []chromedp.ContextOption
+	if process.window != BrowserWindowHeadless {
+		targetID, err := openBackgroundPage(ctx, process.wsURL, process.window)
+		if err != nil {
+			return fmt.Errorf("html capture: open headed page: %w", err)
+		}
+		contextOptions = append(contextOptions, chromedp.WithTargetID(target.ID(targetID)))
+	}
+	browser, cancelBrowser := chromedp.NewContext(allocator, contextOptions...)
 	defer cancelBrowser()
 
 	chromedp.ListenTarget(browser, func(event any) {
@@ -229,20 +238,25 @@ func withHTMLCaptureSession(ctx context.Context, req HTMLCaptureRequest, run fun
 // htmlCaptureChromeArgs 在沙盒底座上再加断网参数。
 func htmlCaptureChromeArgs(profileDir, cacheDir, crashDir string) []string {
 	args := sandboxedChromeArgs(profileDir, cacheDir, crashDir, sandboxedBrowserConfigWithDefaults(SandboxedBrowserConfig{}))
-	args = append(args,
+	args = append(args, htmlCaptureExtraArgs()...)
+	return append(args, "about:blank")
+}
+
+func htmlCaptureExtraArgs() []string {
+	args := []string{
 		"--force-device-scale-factor=1",
 		"--disable-gpu",
 		// 9 是 discard 端口，本机上不会有人听：所有经代理的连接都直接失败。
 		"--proxy-server=http://127.0.0.1:9",
 		"--proxy-bypass-list=<-loopback>",
 		"--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
-	)
+	}
 	// 这里跑的是带脚本的页面，能开进程沙盒就开。只有 root 身份起不来沙盒，
 	// 和截图那条路的兼容取舍一样。
 	if os.Geteuid() == 0 {
 		args = append(args, "--no-sandbox")
 	}
-	return append(args, "about:blank")
+	return args
 }
 
 func answerHTMLCaptureRequest(ctx context.Context, event *fetch.EventRequestPaused, html string, fonts map[string]string) {

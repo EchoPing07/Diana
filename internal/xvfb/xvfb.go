@@ -185,30 +185,61 @@ func (d *Display) Env() []string {
 // 下一次要用时重新拉一块。
 type Shared struct {
 	Width, Height int
+	// RetryInterval caches a failed availability/start attempt. A zero value uses five minutes.
+	// The retry is lazy: reaching the interval does not start a timer or process; the next browser
+	// launch performs the new probe.
+	RetryInterval time.Duration
 
-	mu      sync.Mutex
-	display *Display
+	mu          sync.Mutex
+	display     *Display
+	lastFailure time.Time
 }
 
 // Env 返回有头浏览器该补的环境变量，ok 为假表示这台机器凑不出屏幕、只能无头。
 // 有现成图形会话时不拉 Xvfb，返回空环境。
 func (s *Shared) Env() (env []string, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.display.Alive() {
+		return s.display.Env(), true
+	}
+	retryInterval := s.RetryInterval
+	if retryInterval <= 0 {
+		retryInterval = 5 * time.Minute
+	}
+	if !s.lastFailure.IsZero() && time.Since(s.lastFailure) < retryInterval {
+		return nil, false
+	}
 	if SystemDisplayAvailable() {
+		s.lastFailure = time.Time{}
 		return nil, true
 	}
 	if !Available() {
+		s.lastFailure = time.Now()
 		return nil, false
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.display.Alive() {
-		display, err := Start(s.Width, s.Height)
-		if err != nil {
-			return nil, false
-		}
-		s.display = display
+	display, err := Start(s.Width, s.Height)
+	if err != nil {
+		s.lastFailure = time.Now()
+		return nil, false
 	}
+	s.display = display
+	s.lastFailure = time.Time{}
 	return s.display.Env(), true
+}
+
+// MarkFailure remembers that a headed browser could not use the selected display. Calls during the
+// retry interval fall back immediately; after the interval, the next Env call probes again.
+func (s *Shared) MarkFailure() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	display := s.display
+	s.display = nil
+	s.lastFailure = time.Now()
+	s.mu.Unlock()
+	display.Stop()
 }
 
 // tail 留着 Xvfb 最后几行输出。
