@@ -39,7 +39,7 @@ func TestBrowserActionEntryNeverLogsTypedText(t *testing.T) {
 	}
 }
 
-// 扩展那组记成「你的 Chrome」，失败的记成错误并带上原因；无头渲染和只在开始阶段的事件不记。
+// 扩展那组记成「你的 Chrome」，失败的记成错误并带上原因；一次性渲染和只在开始阶段的事件不记。
 func TestBrowserActionEntrySourcesAndFailures(t *testing.T) {
 	entry, ok := browserActionEntry(MessageEvent{ProfileID: "bot-a"}, agent.RunEvent{
 		Phase:     agent.RunPhaseToolCompleted,
@@ -54,7 +54,7 @@ func TestBrowserActionEntrySourcesAndFailures(t *testing.T) {
 		t.Fatalf("失败应记成错误并带原因：%+v", entry)
 	}
 	if _, ok := browserActionEntry(MessageEvent{}, agent.RunEvent{Phase: agent.RunPhaseToolCompleted, Tool: "browser_render"}); ok {
-		t.Fatal("无头渲染由插件自己记，这里不该重复")
+		t.Fatal("一次性渲染已有独立日志，这里不该重复")
 	}
 	if _, ok := browserActionEntry(MessageEvent{}, agent.RunEvent{Phase: agent.RunPhaseToolStarted, Tool: "browser_open"}); ok {
 		t.Fatal("开始阶段不记，只在完成时记一条")

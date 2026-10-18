@@ -141,7 +141,7 @@ func TestGroupPromptSummaryFullRequestStablePrefix(t *testing.T) {
 		}
 		boundary, summaryIndex, summaries := -1, -1, 0
 		for i, msg := range request.Messages {
-			if msg.CacheBreakpoint {
+			if msg.CacheBreakpoint && boundary < 0 {
 				boundary = i
 			}
 			if strings.Contains(msg.Content, "意图路由前的过期摘要") {

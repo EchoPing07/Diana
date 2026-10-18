@@ -17,69 +17,29 @@ import (
 
 const defaultBrowserRenderURLLimit = 2
 
-const browserRenderWindowModeSetting = "window_mode"
-
-type SandboxedBrowserRenderPlugin struct {
+type BuiltInBrowserRenderer struct {
 	renderer agent.PageRenderer
 	maxURLs  int
 }
 
-// NewSandboxedBrowserRenderPlugin creates the official disposable-browser renderer.
-func NewSandboxedBrowserRenderPlugin() *SandboxedBrowserRenderPlugin {
-	return newSandboxedBrowserRenderPlugin(nil)
+// NewBuiltInBrowserRenderer creates Diana's disposable-browser renderer.
+func NewBuiltInBrowserRenderer() *BuiltInBrowserRenderer {
+	return newBuiltInBrowserRenderer(nil)
 }
 
-func newSandboxedBrowserRenderPlugin(renderer agent.PageRenderer) *SandboxedBrowserRenderPlugin {
-	return &SandboxedBrowserRenderPlugin{renderer: renderer, maxURLs: defaultBrowserRenderURLLimit}
+func newBuiltInBrowserRenderer(renderer agent.PageRenderer) *BuiltInBrowserRenderer {
+	return &BuiltInBrowserRenderer{renderer: renderer, maxURLs: defaultBrowserRenderURLLimit}
 }
 
-func (p *SandboxedBrowserRenderPlugin) Manifest() PluginManifest {
-	return PluginManifest{
-		ID:          sandboxedBrowserPluginID,
-		Name:        "网页渲染",
-		Version:     "0.3.4",
-		Description: "使用 Chromium / Google Chrome，在一次性隔离配置中执行 JavaScript。默认有头运行但窗口看不见，不容易被网站当成机器人拦掉；缺少浏览器时可在依赖管理中安装。",
-		Official:    true,
-		BuiltIn:     true,
-		Permissions: []string{"message:read", "network:http", "browser:render", "sandbox:ephemeral"},
-		Settings: []PluginSettingSpec{{
-			Key:         browserRenderWindowModeSetting,
-			Label:       "Chrome 窗口模式",
-			Type:        PluginSettingTypeSelect,
-			Default:     "auto",
-			Description: "自动：有头运行，窗口开在屏幕外、容器里开在虚拟屏上，看不见也不抢前台，凑不出屏幕时退回无头。始终无头最省资源，但容易被网站认出来拦掉。显示窗口用来排查。都是一次性的临时配置，不读日常浏览器的登录态。",
-			Options: []PluginSettingOption{
-				{Value: "auto", Label: "自动（推荐）"},
-				{Value: "headless", Label: "始终无头"},
-				{Value: "visible", Label: "显示窗口（排查用）"},
-			},
-		}},
-	}
-}
-
-func (p *SandboxedBrowserRenderPlugin) rendererFor(settings SettingValues) agent.PageRenderer {
+func (p *BuiltInBrowserRenderer) rendererFor() agent.PageRenderer {
 	if p.renderer != nil {
 		return p.renderer
 	}
-	return agent.NewSandboxedHeadlessBrowser(agent.SandboxedBrowserConfig{Window: browserRenderWindow(settings)})
+	return agent.NewSandboxedHeadlessBrowser(agent.SandboxedBrowserConfig{Window: agent.BrowserWindowHidden})
 }
 
-// browserRenderWindow 把设置换成窗口模式。读网页默认有头：无头会被搜索引擎和不少站点
-// 认出来拦掉；有头的窗口开在屏幕外、容器里开在虚拟屏上，看不见也不抢前台，凑不出
-// 屏幕时自动退回无头。
-func browserRenderWindow(settings SettingValues) agent.BrowserWindow {
-	switch strings.ToLower(strings.TrimSpace(settings.String(browserRenderWindowModeSetting, "auto"))) {
-	case "headless":
-		return agent.BrowserWindowHeadless
-	case "visible":
-		return agent.BrowserWindowVisible
-	default:
-		return agent.BrowserWindowHidden
-	}
-}
-
-func (p *SandboxedBrowserRenderPlugin) Handle(ctx context.Context, req PluginRequest) (*PluginResponse, error) {
-	renderer := p.rendererFor(req.Settings)
+func (p *BuiltInBrowserRenderer) Handle(ctx context.Context, req PluginRequest) (*PluginResponse, error) {
+	renderer := p.rendererFor()
 	urls := extractBrowserRenderURLs(req)
 	if len(urls) == 0 {
 		return nil, nil
@@ -107,14 +67,14 @@ func (p *SandboxedBrowserRenderPlugin) Handle(ctx context.Context, req PluginReq
 	}, nil
 }
 
-// AgentTools exposes the same renderer to the Agent only while this plugin is enabled.
-func (p *SandboxedBrowserRenderPlugin) AgentTools(settings SettingValues) ([]agent.Tool, error) {
-	renderer := p.rendererFor(settings)
+// AgentTools exposes the built-in renderer to every Agent conversation.
+func (p *BuiltInBrowserRenderer) AgentTools() []agent.Tool {
+	renderer := p.rendererFor()
 	tools := []agent.Tool{agent.NewBrowserRenderTool(renderer)}
 	if browser, ok := renderer.(agent.PageScreenshotter); ok {
 		tools = append(tools, agent.NewWebpageScreenshotTool(browser))
 	}
-	return tools, nil
+	return tools
 }
 
 func extractBrowserRenderURLs(req PluginRequest) []string {
@@ -291,7 +251,7 @@ func browserRenderFailureText(err error) string {
 	case strings.Contains(text, "private address") || strings.Contains(text, "local host") || strings.Contains(text, "credentials are not allowed"):
 		return "已被浏览器安全策略拒绝（仅允许无凭据的公网 HTTP/HTTPS 网页）"
 	case strings.Contains(text, "executable was not found") || strings.Contains(text, "executable not found"):
-		return "未找到 Chrome/Chromium，网页渲染插件暂不可用"
+		return "未找到 Chrome/Chromium，内置网页渲染不可用；请到浏览器页安装运行依赖"
 	default:
 		return "页面无法在沙盒浏览器中完成渲染"
 	}
@@ -314,7 +274,7 @@ func recordBrowserRenderLog(ctx context.Context, req PluginRequest, rawURL strin
 		Kind:     applog.KindOperation,
 		Level:    applog.LevelInfo,
 		Action:   "browser_render",
-		Message:  "沙盒无头浏览器已渲染网页",
+		Message:  "一次性隔离浏览器已渲染网页",
 		Actor:    oneBotEventActor(req.Event),
 		Target:   rawURL,
 		Metadata: metadata,
@@ -322,7 +282,7 @@ func recordBrowserRenderLog(ctx context.Context, req PluginRequest, rawURL strin
 	if renderErr != nil {
 		entry.Kind = applog.KindError
 		entry.Level = applog.LevelError
-		entry.Message = "沙盒无头浏览器渲染失败"
+		entry.Message = "一次性隔离浏览器渲染失败"
 		entry.Detail = renderErr.Error()
 	} else {
 		if page.SourceType == "github_release_api" {

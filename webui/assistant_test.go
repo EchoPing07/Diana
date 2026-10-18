@@ -621,7 +621,7 @@ func (fakeChannel) Status() assistant.ChannelStatus { return assistant.ChannelSt
 // Close 释放当前对象持有的资源。
 func (fakeChannel) Close() error { return nil }
 
-// 依赖按插件分组返回，界面才能把浏览器那一格挂到网页渲染插件上，而不是继续
+// 依赖按能力分组返回，界面才能把浏览器那一格挂到内置网页渲染上，而不是继续
 // 只认链接解析一个插件。
 func TestBotHandlerGroupsPluginDependenciesByPlugin(t *testing.T) {
 	runtime := assistant.NewRuntime(assistant.DefaultBotConfig(), fakeChannel{}, assistant.NewDefaultPluginManager(), nil, nil, nil, nil)
@@ -646,7 +646,7 @@ func TestBotHandlerGroupsPluginDependenciesByPlugin(t *testing.T) {
 	if len(payload.Plugins[assistant.ResolverPluginID]) == 0 {
 		t.Fatalf("resolver group = %#v", payload.Plugins[assistant.ResolverPluginID])
 	}
-	browser := payload.Plugins[assistant.SandboxedBrowserPluginID]
+	browser := payload.Plugins[assistant.BrowserRendererDependencyID]
 	if len(browser) != 2 {
 		t.Fatalf("browser group = %#v", browser)
 	}

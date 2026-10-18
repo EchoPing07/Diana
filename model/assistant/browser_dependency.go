@@ -26,11 +26,11 @@ const browserDependencyName = "browser-renderer"
 
 const relationFontDependencyName = "cjk-font"
 
-// 插件 ID 对外导出，WebUI 要按插件把依赖分组显示。
+// 依赖分组 ID 对外导出，WebUI 用它在浏览器页展示内置网页渲染的依赖。
 const (
-	ResolverPluginID         = resolverPluginID
-	RepositoryWatchPluginID  = repositoryWatchPluginID
-	SandboxedBrowserPluginID = sandboxedBrowserPluginID
+	ResolverPluginID            = resolverPluginID
+	RepositoryWatchPluginID     = repositoryWatchPluginID
+	BrowserRendererDependencyID = "core.browser-renderer"
 )
 
 // BrowserDependencies 返回缓存的浏览器探测结果。
@@ -145,7 +145,7 @@ func verifiedBrowserInstallResult(installer string) (ResolverDependencyInstallRe
 }
 
 func browserDependencyGroup(deps []ResolverDependency) map[string][]ResolverDependency {
-	return map[string][]ResolverDependency{SandboxedBrowserPluginID: deps, GroupRelationsPluginID: RelationRenderDependencies(deps)}
+	return map[string][]ResolverDependency{BrowserRendererDependencyID: deps, GroupRelationsPluginID: RelationRenderDependencies(deps)}
 }
 
 // RelationRenderDependencies 展示中文字体与备用浏览器。复杂文字走浏览器排版，

@@ -75,9 +75,9 @@ func (t *dianaMCPMediaTool) Run(ctx context.Context, input map[string]any) (stri
 func (t *dianaMCPMediaTool) sendImage(ctx context.Context, media agent.MCPMedia) (string, error) {
 	mimeType := strings.ToLower(media.MIMEType)
 	if mimeType == "image/svg+xml" {
-		// 和 send_attachment 一样：SVG 不能直接当图片发，栅格化归「网页渲染」插件管。
+		// 和 send_attachment 一样：SVG 不能直接当图片发，栅格化使用内置网页渲染。
 		if !t.runtime.sandboxedBrowserEnabled(t.event) {
-			return "", fmt.Errorf("svg 作为图片发送需要先栅格化成 PNG，但「网页渲染」插件没有启用；可以改用 as=file 发原始 SVG")
+			return "", fmt.Errorf("svg 作为图片发送需要先栅格化成 PNG，但内置网页渲染不可用；可以改用 as=file 发原始 SVG")
 		}
 		png, err := t.runtime.renderContentPNG(ctx, t.event, renderFormatSVG, string(media.Data), "")
 		if err != nil {

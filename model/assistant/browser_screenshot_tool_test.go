@@ -126,23 +126,18 @@ func TestScreenshotViewAndTelegramDeliveryStayInCurrentReply(t *testing.T) {
 	}
 }
 
-func TestPublicScreenshotFollowsBrowserPluginAndDoesNotGrantLoggedBrowser(t *testing.T) {
+func TestPublicScreenshotIsBuiltInAndDoesNotGrantLoggedBrowser(t *testing.T) {
 	t.Setenv("APP_DB_PATH", filepath.Join(t.TempDir(), "diana.db"))
-	plugin := newSandboxedBrowserRenderPlugin(screenshotBrowserStub{data: assistantScreenshotPNG(t)})
-	manager := NewPluginManager(plugin)
-	for _, enabled := range []bool{true, false} {
-		tools, err := manager.AgentToolsWithOverrides(map[string]bool{sandboxedBrowserPluginID: enabled})
-		if err != nil {
-			t.Fatal(err)
-		}
+	tools := newBuiltInBrowserRenderer(screenshotBrowserStub{data: assistantScreenshotPNG(t)}).AgentTools()
+	{
 		cfg := BotConfig{AgentBrowserScreenshotAccess: BrowserScreenshotAccess{Mode: BrowserScreenshotDisabled}}.WithDefaults()
 		registry, err := (&Runtime{}).newAgentRegistry(context.Background(), cfg, MessageEvent{UserID: "member"}, RelationshipPolicy{}, tools...)
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer registry.Close()
-		if _, ok := registry.Get("webpage_screenshot"); ok != enabled {
-			t.Fatalf("plugin enabled=%v screenshot visible=%v", enabled, ok)
+		if _, ok := registry.Get("webpage_screenshot"); !ok {
+			t.Fatal("built-in webpage_screenshot is missing")
 		}
 		for _, name := range []string{"browser_screenshot", "browser_open", "browser_click", "view_image", "send_attachment"} {
 			if _, ok := registry.Get(name); ok {

@@ -14,17 +14,25 @@ import (
 	"github.com/SuInk/diana/model/agent"
 )
 
-func TestDefaultPluginManagerIncludesSandboxedBrowserRenderer(t *testing.T) {
+func TestDefaultPluginManagerDoesNotListBuiltInBrowserRenderer(t *testing.T) {
 	manager := NewDefaultPluginManager()
-	state, ok := manager.Get(sandboxedBrowserPluginID)
-	if !ok || !state.Installed || !state.Enabled {
-		t.Fatalf("browser renderer state = %#v, ok=%v", state, ok)
+	for _, state := range manager.List() {
+		if state.Manifest.ID == "official.sandboxed-browser-renderer" {
+			t.Fatalf("browser renderer is still exposed as a plugin: %#v", state)
+		}
+	}
+	manager.Restore(map[string]PersistedPluginState{
+		"official.sandboxed-browser-renderer": {Installed: true, Enabled: boolPointer(false)},
+	})
+	runtime := NewRuntime(DefaultBotConfig(), nilChannel{}, manager, nil, nil, nil, nil)
+	if !runtime.sandboxedBrowserEnabled(MessageEvent{}) {
+		t.Fatal("legacy plugin state disabled the built-in browser renderer")
 	}
 }
 
-func TestSandboxedBrowserPluginRendersQuotedURL(t *testing.T) {
+func TestBuiltInBrowserRendererRendersQuotedURL(t *testing.T) {
 	var renderedURL string
-	plugin := newSandboxedBrowserRenderPlugin(agent.PageRendererFunc(func(_ context.Context, rawURL string) (agent.RenderedPage, error) {
+	plugin := newBuiltInBrowserRenderer(agent.PageRendererFunc(func(_ context.Context, rawURL string) (agent.RenderedPage, error) {
 		renderedURL = rawURL
 		return agent.RenderedPage{
 			RequestedURL:    rawURL,
@@ -65,9 +73,9 @@ func TestSandboxedBrowserPluginRendersQuotedURL(t *testing.T) {
 	}
 }
 
-func TestSandboxedBrowserPluginSkipsAPIURLFromQuotedBotError(t *testing.T) {
+func TestBuiltInBrowserRendererSkipsAPIURLFromQuotedBotError(t *testing.T) {
 	var rendered bool
-	plugin := newSandboxedBrowserRenderPlugin(agent.PageRendererFunc(func(context.Context, string) (agent.RenderedPage, error) {
+	plugin := newBuiltInBrowserRenderer(agent.PageRendererFunc(func(context.Context, string) (agent.RenderedPage, error) {
 		rendered = true
 		return agent.RenderedPage{}, nil
 	}))
@@ -90,9 +98,9 @@ func TestSandboxedBrowserPluginSkipsAPIURLFromQuotedBotError(t *testing.T) {
 	}
 }
 
-func TestSandboxedBrowserPluginKeepsAPIURLQuotedFromAnotherUser(t *testing.T) {
+func TestBuiltInBrowserRendererKeepsAPIURLQuotedFromAnotherUser(t *testing.T) {
 	var renderedURL string
-	plugin := newSandboxedBrowserRenderPlugin(agent.PageRendererFunc(func(_ context.Context, rawURL string) (agent.RenderedPage, error) {
+	plugin := newBuiltInBrowserRenderer(agent.PageRendererFunc(func(_ context.Context, rawURL string) (agent.RenderedPage, error) {
 		renderedURL = rawURL
 		return agent.RenderedPage{RequestedURL: rawURL, URL: rawURL, Sandboxed: true}, nil
 	}))
@@ -114,9 +122,9 @@ func TestSandboxedBrowserPluginKeepsAPIURLQuotedFromAnotherUser(t *testing.T) {
 	}
 }
 
-func TestSandboxedBrowserPluginSkipsCurrentMediaTransportURL(t *testing.T) {
+func TestBuiltInBrowserRendererSkipsCurrentMediaTransportURL(t *testing.T) {
 	var rendered bool
-	plugin := newSandboxedBrowserRenderPlugin(agent.PageRendererFunc(func(context.Context, string) (agent.RenderedPage, error) {
+	plugin := newBuiltInBrowserRenderer(agent.PageRendererFunc(func(context.Context, string) (agent.RenderedPage, error) {
 		rendered = true
 		return agent.RenderedPage{}, nil
 	}))
@@ -139,9 +147,9 @@ func TestSandboxedBrowserPluginSkipsCurrentMediaTransportURL(t *testing.T) {
 	}
 }
 
-func TestSandboxedBrowserPluginSkipsQuotedMediaButKeepsTextURL(t *testing.T) {
+func TestBuiltInBrowserRendererSkipsQuotedMediaButKeepsTextURL(t *testing.T) {
 	var rendered []string
-	plugin := newSandboxedBrowserRenderPlugin(agent.PageRendererFunc(func(_ context.Context, rawURL string) (agent.RenderedPage, error) {
+	plugin := newBuiltInBrowserRenderer(agent.PageRendererFunc(func(_ context.Context, rawURL string) (agent.RenderedPage, error) {
 		rendered = append(rendered, rawURL)
 		return agent.RenderedPage{RequestedURL: rawURL, URL: rawURL, Sandboxed: true}, nil
 	}))
@@ -169,8 +177,8 @@ func TestSandboxedBrowserPluginSkipsQuotedMediaButKeepsTextURL(t *testing.T) {
 	}
 }
 
-func TestSandboxedBrowserPluginFailureIsSafeForUserContext(t *testing.T) {
-	plugin := newSandboxedBrowserRenderPlugin(agent.PageRendererFunc(func(context.Context, string) (agent.RenderedPage, error) {
+func TestBuiltInBrowserRendererFailureIsSafeForUserContext(t *testing.T) {
+	plugin := newBuiltInBrowserRenderer(agent.PageRendererFunc(func(context.Context, string) (agent.RenderedPage, error) {
 		return agent.RenderedPage{}, errors.New("open /private/example-user/secret: operation not permitted")
 	}))
 	resp, err := plugin.Handle(context.Background(), PluginRequest{Text: "看看 https://example.com"})
@@ -182,21 +190,17 @@ func TestSandboxedBrowserPluginFailureIsSafeForUserContext(t *testing.T) {
 	}
 }
 
-func TestSandboxedBrowserPluginProvidesAgentTool(t *testing.T) {
-	plugin := newSandboxedBrowserRenderPlugin(agent.PageRendererFunc(func(_ context.Context, rawURL string) (agent.RenderedPage, error) {
+func TestBuiltInBrowserRendererProvidesAgentTool(t *testing.T) {
+	plugin := newBuiltInBrowserRenderer(agent.PageRendererFunc(func(_ context.Context, rawURL string) (agent.RenderedPage, error) {
 		return agent.RenderedPage{RequestedURL: rawURL, URL: rawURL, Title: "ok", Sandboxed: true}, nil
 	}))
-	tools, err := plugin.AgentTools(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	tools := plugin.AgentTools()
 	if len(tools) != 1 || tools[0].Name() != "browser_render" {
 		t.Fatalf("tools = %#v", tools)
 	}
 }
 
-func TestSandboxedBrowserAgentToolFollowsPluginOverride(t *testing.T) {
-	manager := NewDefaultPluginManager()
+func TestBuiltInBrowserAgentToolHasNoPluginOverride(t *testing.T) {
 	hasBrowserRender := func(tools []agent.Tool) bool {
 		for _, tool := range tools {
 			if tool.Name() == "browser_render" {
@@ -205,19 +209,9 @@ func TestSandboxedBrowserAgentToolFollowsPluginOverride(t *testing.T) {
 		}
 		return false
 	}
-	tools, err := manager.AgentToolsWithOverrides(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	tools := NewBuiltInBrowserRenderer().AgentTools()
 	if !hasBrowserRender(tools) {
-		t.Fatal("browser_render missing while plugin is enabled")
-	}
-	tools, err = manager.AgentToolsWithOverrides(map[string]bool{sandboxedBrowserPluginID: false})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if hasBrowserRender(tools) {
-		t.Fatal("browser_render remains available while plugin override is disabled")
+		t.Fatal("browser_render missing from built-in renderer")
 	}
 }
 
@@ -249,23 +243,8 @@ func TestBrowserRenderFailureTextSeparatesBusyFromTimeout(t *testing.T) {
 	if got := browserRenderFailureText(timeout); got != "页面渲染超时" {
 		t.Fatalf("页面超时：%q", got)
 	}
-}
-
-// 读网页默认有头但看不见；只有明确选了才无头或弹窗口。
-func TestBrowserRenderWindowDefaultsToHiddenHeadful(t *testing.T) {
-	cases := map[string]agent.BrowserWindow{
-		"":         agent.BrowserWindowHidden,
-		"auto":     agent.BrowserWindowHidden,
-		"headless": agent.BrowserWindowHeadless,
-		"visible":  agent.BrowserWindowVisible,
-	}
-	for value, want := range cases {
-		settings := SettingValues{}
-		if value != "" {
-			settings = SettingValues{browserRenderWindowModeSetting: value}
-		}
-		if got := browserRenderWindow(settings); got != want {
-			t.Fatalf("窗口设置 %q 应当是 %q，得到 %q", value, want, got)
-		}
+	missing := errors.New("browser executable was not found")
+	if got := browserRenderFailureText(missing); !strings.Contains(got, "未找到 Chrome/Chromium") || !strings.Contains(got, "浏览器页") {
+		t.Fatalf("浏览器缺失没有明确报错和修复入口：%q", got)
 	}
 }

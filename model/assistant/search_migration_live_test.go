@@ -72,7 +72,7 @@ func TestLiveSearchMigration(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.Name, func(t *testing.T) {
-			plugins := NewPluginManager(&WebSearchPlugin{renderer: renderer}, NewSandboxedBrowserRenderPlugin())
+			plugins := NewPluginManager(&WebSearchPlugin{renderer: renderer})
 			plugins.Restore(bundle.PluginStates)
 			cfg := bundle.BotConfig.WithDefaults()
 			cfg.ModelRoles = nil // the client already carries the exact production reply-role configuration
@@ -82,6 +82,7 @@ func TestLiveSearchMigration(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			tools = append(NewBuiltInBrowserRenderer().AgentTools(), tools...)
 			var mu sync.Mutex
 			var steps []agent.Step
 			var recorded []agent.Tool

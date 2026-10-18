@@ -7,6 +7,7 @@ import (
 	"fmt"
 	cdplog "github.com/chromedp/cdproto/log"
 	"github.com/chromedp/cdproto/network"
+	"github.com/chromedp/cdproto/target"
 	"image/png"
 	"io"
 	"net/url"
@@ -47,10 +48,6 @@ func captureFontReadyScreenshot(ctx context.Context, req ScreenshotRequest) ([]b
 	}
 	ctx, cancel := context.WithTimeout(ctx, req.Timeout)
 	defer cancel()
-	args := sandboxedChromeArgs(dirs.profile, dirs.cache, dirs.crash, sandboxedBrowserConfigWithDefaults(SandboxedBrowserConfig{}))
-	// Preserve the existing local-HTML screenshot isolation policy. Public
-	// webpage rendering still uses launchSandboxedChrome without this flag.
-	args = append(args, "--no-sandbox", "--disable-gpu", "about:blank")
 	var extraEnv []string
 	if runtime.GOOS == "linux" && len(req.FontFiles) > 0 {
 		configPath, err := screenshotFontConfig(dirs.root, dirs.cache)
@@ -59,14 +56,25 @@ func captureFontReadyScreenshot(ctx context.Context, req ScreenshotRequest) ([]b
 		}
 		extraEnv = []string{"FONTCONFIG_FILE=" + configPath}
 	}
-	process, err := launchChromeProcessWithEnv(ctx, executable, dirs.root, args, extraEnv)
+	process, err := launchSandboxedChromeWithEnv(ctx, executable, dirs.root, dirs.profile, dirs.cache, dirs.crash, SandboxedBrowserConfig{
+		Window:    BrowserWindowHidden,
+		ExtraArgs: []string{"--no-sandbox", "--disable-gpu"},
+	}, extraEnv)
 	if err != nil {
 		return nil, err
 	}
 	defer process.stop()
 	allocator, cancelAllocator := chromedp.NewRemoteAllocator(ctx, process.wsURL, chromedp.NoModifyURL)
 	defer cancelAllocator()
-	browser, cancelBrowser := chromedp.NewContext(allocator)
+	var contextOptions []chromedp.ContextOption
+	if process.window != BrowserWindowHeadless {
+		targetID, err := openBackgroundPage(ctx, process.wsURL, process.window)
+		if err != nil {
+			return nil, err
+		}
+		contextOptions = append(contextOptions, chromedp.WithTargetID(target.ID(targetID)))
+	}
+	browser, cancelBrowser := chromedp.NewContext(allocator, contextOptions...)
 	defer cancelBrowser()
 	path := filepath.ToSlash(pagePath)
 	if len(path) > 1 && path[1] == ':' {

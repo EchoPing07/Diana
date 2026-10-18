@@ -20,7 +20,7 @@ import (
 // 网址、点过哪里，所以单独记一条，并带上机器人 ID，浏览器页按机器人筛。
 const BrowserActionLogAction = "browser_action"
 
-// browserActionVerbs 是记进日志的动作名。browser_render 不在里面：它是一次性无头
+// browserActionVerbs 是记进日志的动作名。browser_render 不在里面：它是一次性隔离
 // 渲染、不带登录态，插件自己已经记了一条。
 var browserActionVerbs = map[string]string{
 	"browser_open":       "打开网页",

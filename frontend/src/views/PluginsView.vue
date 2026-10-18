@@ -6,7 +6,7 @@
     <div class="segmented extension-tabs" role="tablist" aria-label="扩展类型">
       <button v-for="tab in extensionTabs" :key="tab.value" type="button" role="tab" :aria-selected="activeTab === tab.value" :class="{active:activeTab === tab.value}" @click="changeExtensionTab(tab.value)">{{ tab.label }}</button>
     </div>
-    <!-- 浏览器也是给机器人加的能力（网页渲染本身就是插件），放在扩展里当一档；
+    <!-- 浏览器依赖与内置网页渲染统一放在浏览器页；
          它有自己的地址 /browser，旧书签照样能用。 -->
     <BrowserBoxView v-if="showBrowser" />
     <ExtensionManager v-if="!showBrowser && (extensionTab === 'skill' || extensionTab === 'mcp')" ref="extensionManager" :key="extensionTab" :kind="extensionTab" />
@@ -850,7 +850,6 @@ const loadError = ref("");
 const busyID = ref("");
 
 const resolverPluginID = "official.nonebot-plugin-resolver-go";
-const sandboxedBrowserPluginID = "official.sandboxed-browser-renderer";
 const groupRelationsPluginID = "group_relations";
 const repositoryWatchPluginID = "official.repository-watch";
 const repositoryPublishPluginID = "official.repository-publish";
@@ -858,8 +857,7 @@ const rssWatchPluginID = "official.rss-watch";
 const musicPluginID = "official.music";
 const stickerPluginID = "official.sticker-sender";
 const vrchatPluginID = "official.vrchat-osc";
-// 依赖按插件 ID 分组：链接解析要 yt-dlp/ffmpeg，网页渲染要一个
-// Chrome/Chromium，以后再有别的插件也不必再往模板里加一个 id 判断。
+// 依赖按插件 ID 分组；内置网页渲染的浏览器依赖改在浏览器页展示。
 const dependencyGroups = ref<Record<string, ResolverDependency[]>>({});
 const dependenciesLoading = ref(false);
 const busyDependency = ref("");
@@ -868,8 +866,6 @@ const permissionsTarget = ref<PluginState | null>(null);
 
 const dependencyHints: Record<string, string> = {
   [resolverPluginID]: "缺少这些命令时，对应平台的解析会失败；可直接在这里安装。",
-  [sandboxedBrowserPluginID]:
-    "复用系统 Chromium / Google Chrome；缺少时通过系统包管理器安装（Linux 安装 Chromium，macOS / Windows 安装 Chrome），安装需要相应系统权限。中文字体可一键下载；出图时按实际文字补齐缺失的多语言字体和单色 Emoji 字体，保存到应用缓存，无需管理员权限。官方 Docker 镜像已预装浏览器和中文字体。",
   [groupRelationsPluginID]:
     "关系图优先使用中文字体直接出图；缺失时可一键下载，首次出图也会自动补齐。浏览器截图作为备用路径。"
 };

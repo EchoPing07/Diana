@@ -6,55 +6,13 @@ package agent
 import (
 	"context"
 	"image"
-	"image/color"
 	"image/png"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
-	"time"
 )
-
-func TestCaptureHTMLScreenshotAcceptsCompletedPNGFromHangingBrowser(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("fake browser uses a POSIX shell script")
-	}
-	dir := t.TempDir()
-	fixture := filepath.Join(dir, "fixture.png")
-	file, err := os.Create(fixture)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := png.Encode(file, image.NewRGBA(image.Rect(0, 0, 4, 4))); err != nil {
-		t.Fatal(err)
-	}
-	if err := file.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	browser := filepath.Join(dir, "chrome")
-	writeExecutable(t, browser, "#!/bin/sh\n"+
-		"if [ \"$1\" = \"--version\" ]; then echo 'Chromium test'; exit 0; fi\n"+
-		"for arg in \"$@\"; do case \"$arg\" in --screenshot=*) cp '"+fixture+"' \"${arg#--screenshot=}\";; esac; done\n"+
-		"while :; do :; done\n")
-
-	started := time.Now()
-	raw, err := CaptureHTMLScreenshot(context.Background(), ScreenshotRequest{
-		HTML:       "<body>ok</body>",
-		Executable: browser,
-		Timeout:    3 * time.Second,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if time.Since(started) >= 2*time.Second {
-		t.Fatalf("截图已写完却仍等待浏览器退出：%s", time.Since(started))
-	}
-	if _, err := png.DecodeConfig(strings.NewReader(string(raw))); err != nil {
-		t.Fatalf("returned invalid PNG: %v", err)
-	}
-}
 
 func TestProbeHeadlessBrowserRenderingChecksRealScreenshot(t *testing.T) {
 	if runtime.GOOS == "windows" {
@@ -80,32 +38,6 @@ func TestProbeHeadlessBrowserRenderingIntegration(t *testing.T) {
 	t.Logf("browser=%s version=%s", status.Path, status.Version)
 }
 
-func TestReadCompletedScreenshotRejectsInvalidPNG(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "shot.png")
-	if err := os.WriteFile(path, []byte("not a png"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := readCompletedScreenshot(path); err == nil {
-		t.Fatal("invalid PNG was accepted")
-	}
-
-	img := image.NewRGBA(image.Rect(0, 0, 1, 1))
-	img.Set(0, 0, color.Black)
-	file, err := os.Create(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := png.Encode(file, img); err != nil {
-		t.Fatal(err)
-	}
-	if err := file.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := readCompletedScreenshot(path); err != nil {
-		t.Fatalf("valid PNG was rejected: %v", err)
-	}
-}
-
 func TestBrowserProbeRejectsScreenshotOnlySuccess(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX fake browser")
@@ -125,7 +57,7 @@ func TestBrowserProbeRejectsScreenshotOnlySuccess(t *testing.T) {
 	browser := filepath.Join(dir, "chromium")
 	writeExecutable(t, browser, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'Chromium test'; exit 0; fi\nfor arg in \"$@\"; do case \"$arg\" in --screenshot=*) cp '"+fixture+"' \"${arg#--screenshot=}\";; esac; done\n")
 	status := ProbeHeadlessBrowserRendering(context.Background(), browser)
-	if status.Available || !strings.Contains(status.Detail, "网页沙箱启动失败") {
+	if status.Available || !strings.Contains(status.Detail, "真实截图失败") {
 		t.Fatalf("screenshot-only browser incorrectly available: %#v", status)
 	}
 }

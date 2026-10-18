@@ -123,7 +123,7 @@ func (h *BrowserSourceHandler) state() browserSourceState {
 	}
 }
 
-// boxDependencies 是内置浏览器的运行依赖。浏览器和中文字体复用网页渲染插件那套探测
+// boxDependencies 是内置浏览器的运行依赖。浏览器和中文字体复用内置网页渲染的探测
 // 和一键安装——找的是同一个 Chrome；显示器只影响能不能开真窗口，没有也能无头跑。
 func boxDependencies() []assistant.ResolverDependency {
 	deps := assistant.BrowserDependencies()
