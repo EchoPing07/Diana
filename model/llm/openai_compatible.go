@@ -1287,7 +1287,7 @@ func openAIResponseFromEventStream(body []byte) *responses.Response {
 				indexes = append(indexes, event.OutputIndex)
 			}
 			items[event.OutputIndex] = item
-		case "response.completed":
+		case "response.completed", "response.incomplete":
 			response := event.Response
 			completed = &response
 		}
@@ -1318,7 +1318,7 @@ func openAIResponseFromEventStream(body []byte) *responses.Response {
 			resp.Output = append(resp.Output, items[index])
 		}
 	}
-	if strings.TrimSpace(resp.OutputText()) == "" && !openAIResponseHasFunctionCall(resp.Output) {
+	if resp.Status != responses.ResponseStatusIncomplete && strings.TrimSpace(resp.OutputText()) == "" && !openAIResponseHasFunctionCall(resp.Output) {
 		return nil
 	}
 	return resp
