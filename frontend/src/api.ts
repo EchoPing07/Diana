@@ -1597,6 +1597,24 @@ export function generatePersona(
   });
 }
 
+export interface RSSAssistResponse {
+  text: string;
+  model?: string;
+  provider?: string;
+}
+
+/** 用指定机器人的对话模型整理 RSS 正则、判断规则或回复格式，不保存订阅。 */
+export function assistRSSRule(
+  kind: "regex" | "judge" | "reply",
+  request: string,
+  options?: { profile_id?: string; group?: string; model?: string }
+): Promise<RSSAssistResponse> {
+  return requestJSON<RSSAssistResponse>("/api/llm/rss-assist", {
+    method: "POST",
+    body: JSON.stringify({ kind, request, ...(options ?? {}) })
+  });
+}
+
 export function testLLMImage(prompt: string, config?: LLMConfig): Promise<ImageGenerateResponse> {
   return requestJSON<ImageGenerateResponse>("/api/llm/test", {
     method: "POST",
@@ -4060,6 +4078,13 @@ export interface AssistantTask {
   feed_handle?: string;
   feed_sources?: RSSWatchSource[];
   feed_judge_prompt?: string;
+  feed_rule_mode?: string;
+  feed_media_mode?: string;
+  feed_reply_prompt?: string;
+  feed_reply_mode?: string;
+  feed_judge_model_id?: string;
+  feed_translation_model_id?: string;
+  feed_media_failure?: string;
   last_feed_item_id?: string;
   last_feed_published_at?: string;
   // 只在事件触发任务上有值。
@@ -4124,6 +4149,13 @@ export interface RSSWatchInput {
   twitter_handle?: string;
   feed_urls?: string[];
   twitter_handles?: string[];
+  rule_mode?: string;
+  media_mode?: string;
+  reply_prompt?: string;
+  reply_mode?: string;
+  judge_model_id?: string;
+  translation_model_id?: string;
+  media_failure?: string;
   judge_prompt: string;
   interval_seconds: number;
   profile_id?: string;
@@ -4166,7 +4198,7 @@ export function createRSSWatch(input: RSSWatchInput): Promise<AssistantTask> {
   return requestJSON<AssistantTask>("/api/assistant/tasks/rss-watches", { method: "POST", body: JSON.stringify(input) });
 }
 
-export function updateRSSWatch(id: string, input: Partial<Pick<RSSWatchInput, "feed_url" | "twitter_handle" | "feed_urls" | "twitter_handles" | "judge_prompt" | "interval_seconds">>): Promise<AssistantTask> {
+export function updateRSSWatch(id: string, input: Partial<Pick<RSSWatchInput, "feed_url" | "twitter_handle" | "feed_urls" | "twitter_handles" | "judge_prompt" | "rule_mode" | "media_mode" | "reply_prompt" | "reply_mode" | "judge_model_id" | "translation_model_id" | "media_failure" | "interval_seconds">>): Promise<AssistantTask> {
   return requestJSON<AssistantTask>(`/api/assistant/tasks/rss-watches/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(input) });
 }
 

@@ -25,6 +25,28 @@ test("subscription settings list every robot and only use the selected robot as 
   }
 });
 
+test("RSS editor keeps a compact rule and defaults LLM to every media type", async () => {
+  const source = await readFile(new URL("../components/RSSWatchManager.vue", import.meta.url), "utf8");
+  assert.match(source, /全部推送.*正则匹配.*LLM 判断/);
+  assert.match(source, /默认同时判断文字、图片、视频画面和音频/);
+  assert.match(source, /media_mode: "video_audio", media_failure: "text"/);
+  assert.match(source, /判断与回复规则/);
+  assert.doesNotMatch(source, /rss-watch-reply|回复格式（可选）/);
+  assert.match(source, /delivery_mode: "llm"/);
+  assert.match(source, /id="rss-watch-judge-model"/);
+  assert.match(source, /label: "跟随对话"/);
+  assert.match(source, /reply_mode: "decision"/);
+  assert.match(source, /judge_model_id: form\.value\.delivery_mode === "llm" \? form\.value\.judge_model_id : ""/);
+  assert.equal((source.match(/>AI 帮写<\/button>/g) || []).length, 1);
+  assert.match(source, /openAssist\(form\.delivery_mode === 'regex' \? 'regex' : 'judge'\)/);
+  assert.match(source, /<Modal v-if="assistComposer"[^>]+@close="closeAssist"/);
+  assert.match(source, />应用到规则<\/button>/);
+  assert.match(source, /function applyAssist\(\)[\s\S]+form\.value\.judge_prompt = composer\.result/);
+  assert.match(source, /composer\.kind === "judge" \? "llm" : composer\.kind/);
+  assert.doesNotMatch(source, /rss-watch-translation-model|rss-watch-media|mediaModeOptions|mediaFailureOptions/);
+  assert.doesNotMatch(source, /translation_model_id: form/);
+});
+
 
 test("switching robots changes enabled state without replacing shared settings or secret flags", () => {
   const state = { manifest: { id: "official.rss-watch" }, enabled: true, profile_enabled: { qq: false, tg: true }, settings: { timeout_seconds: 45 }, secrets_configured: { token: true } };

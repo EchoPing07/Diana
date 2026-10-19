@@ -156,6 +156,17 @@ func TestRSSJudgeDecisionRequiresNotify(t *testing.T) {
 	if err != nil || decision.Notify || decision.Reply != "" {
 		t.Fatalf("decision=%#v err=%v", decision, err)
 	}
+	original, err := parseRSSJudgeDecision(`{"notify":true,"reply_mode":"original","reply":"https://example.com/1"}`)
+	if err != nil || original.ReplyMode != "original" {
+		t.Fatalf("original=%#v err=%v", original, err)
+	}
+	processed, err := parseRSSJudgeDecision(`{"notify":true,"reply_mode":"processed","reply":"中文摘要 https://example.com/1"}`)
+	if err != nil || processed.ReplyMode != "processed" {
+		t.Fatalf("processed=%#v err=%v", processed, err)
+	}
+	if _, err := parseRSSJudgeDecision(`{"notify":true,"reply_mode":"other","reply":"https://example.com/1"}`); err == nil {
+		t.Fatal("accepted unknown reply_mode")
+	}
 }
 
 // 光报一个「HTTP 404」没法行动：同样是 404，可能是用户名打错了，也可能是整条
@@ -270,8 +281,8 @@ func TestRuntimeRSSWatchCoversSeveralSourcesWithOneRule(t *testing.T) {
 	store := &stubReminderStore{}
 	channel := &recordingChannel{}
 	provider := &sequenceLLMProvider{replies: []string{
-		`{"notify":true,"reply":"站点甲宣布额度重置"}`,
-		`{"notify":true,"reply":"站点乙宣布额度重置"}`,
+		`{"notify":true,"reply_mode":"original","reply":"https://x.com/tibo/status/a-new"}`,
+		`{"notify":true,"reply_mode":"original","reply":"https://x.com/tibo/status/b-new"}`,
 	}}
 	runtime := NewRuntime(BotConfig{RequestTimeout: 5 * time.Second}, channel, NewPluginManager(NewRSSWatchPlugin(firstServer.Client())), nil, store, nil, func() (LLMProvider, error) { return provider, nil })
 	item, err := runtime.CreateRSSWatch(context.Background(), RSSWatchCreateInput{
@@ -329,7 +340,7 @@ func TestRuntimeRSSWatchKeepsGoingWhenOneSourceFails(t *testing.T) {
 		TriggerAt: time.Now().Add(-time.Second), IntervalSeconds: 900,
 	}}}
 	channel := &recordingChannel{}
-	provider := &sequenceLLMProvider{replies: []string{`{"notify":true,"reply":"站点甲宣布额度重置"}`}}
+	provider := &sequenceLLMProvider{replies: []string{`{"notify":true,"reply_mode":"original","reply":"https://x.com/tibo/status/a-new"}`}}
 	runtime := NewRuntime(BotConfig{RequestTimeout: 5 * time.Second}, channel, NewPluginManager(NewRSSWatchPlugin(healthyServer.Client())), nil, store, nil, func() (LLMProvider, error) { return provider, nil })
 	runtime.fireDueReminders(context.Background())
 	stored := ReminderFeedSources(store.items[0])
@@ -420,5 +431,138 @@ func TestUpdateRSSWatchKeepsCursorsOfKeptSources(t *testing.T) {
 	}
 	if !strings.Contains(updated.Message, "站点甲") || !strings.Contains(updated.Message, "站点乙") {
 		t.Fatalf("message=%q", updated.Message)
+	}
+}
+
+func TestRSSWatchRulesCanBeEmptyOrCleared(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, rssTestBody(rssTestItem("base", "Initial", "old", "")))
+	}))
+	defer server.Close()
+	store := &stubReminderStore{}
+	runtime := NewRuntime(BotConfig{}, &recordingChannel{}, NewPluginManager(NewRSSWatchPlugin(server.Client())), nil, store, nil, nil)
+	item, err := runtime.CreateRSSWatch(context.Background(), RSSWatchCreateInput{FeedURL: server.URL, UserID: "owner", OwnerID: "owner"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.FeedJudgePrompt != "" || item.LastFeedItemID != "base" {
+		t.Fatalf("item=%+v", item)
+	}
+	rule := "Only trailers"
+	item, err = runtime.UpdateRSSWatch(context.Background(), "owner", item.ID, RSSWatchUpdateInput{JudgePrompt: &rule})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.FeedJudgePrompt != rule {
+		t.Fatal("rule not saved")
+	}
+	empty := "  "
+	item, err = runtime.UpdateRSSWatch(context.Background(), "owner", item.ID, RSSWatchUpdateInput{JudgePrompt: &empty})
+	if err != nil || item.FeedJudgePrompt != "" || item.LastFeedItemID != "base" {
+		t.Fatalf("clear=%+v err=%v", item, err)
+	}
+}
+
+func TestRSSWatchWithoutRulesSendsAllNewItemsWithoutLLM(t *testing.T) {
+	var items []string
+	for i := 35; i >= 0; i-- {
+		items = append(items, rssTestItem(fmt.Sprint(i), fmt.Sprintf("Title %02d", i), fmt.Sprintf("Body %02d [CQ:at,qq=all]", i), ""))
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, rssTestBody(items...)) }))
+	defer server.Close()
+	plugin := NewRSSWatchPlugin(server.Client())
+	modelCalls := 0
+	runtime := NewRuntime(BotConfig{}, &recordingChannel{}, NewPluginManager(plugin), nil, nil, nil, func() (LLMProvider, error) { modelCalls++; return nil, errors.New("must not call LLM") })
+	source := ReminderFeedSource{FeedURL: server.URL, LastItemID: "0"}
+	notice, err := runtime.checkRSSWatchSource(context.Background(), Reminder{}, &source, plugin, SettingValues{rssWatchSettingItemLimit: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if modelCalls != 0 || source.LastItemID != "35" {
+		t.Fatalf("calls=%d source=%+v", modelCalls, source)
+	}
+	last := -1
+	for i := 1; i <= 35; i++ {
+		pos := strings.Index(notice, fmt.Sprintf("Body %02d", i))
+		if pos < 0 || pos <= last {
+			t.Fatalf("item %d missing or out of order", i)
+		}
+		last = pos
+	}
+	if strings.Contains(notice, "Body 00") || strings.Contains(notice, "[CQ:at") {
+		t.Fatal("old item or executable CQ leaked")
+	}
+	again, err := runtime.checkRSSWatchSource(context.Background(), Reminder{}, &source, plugin, nil)
+	if err != nil || again != "" {
+		t.Fatalf("duplicate delivery: %q %v", again, err)
+	}
+	filtered, err := plugin.check(context.Background(), server.URL, "0", time.Time{}, SettingValues{rssWatchSettingItemLimit: 1})
+	if err != nil || len(filtered.Items) != 1 {
+		t.Fatalf("judge limit changed: %+v %v", filtered, err)
+	}
+}
+
+func TestRSSWatchRegexModesAndValidation(t *testing.T) {
+	for _, tc := range []struct {
+		mode, rule, want string
+		invalid          bool
+	}{
+		{"", "", "all", false}, {"", "release", "llm", false}, {"regex", "(?i)release|更新", "regex", false},
+		{"regex", "[", "", true}, {"regex", "(?=x)", "", true}, {"regex", "", "", true}, {"llm", "", "", true}, {"unknown", "x", "", true},
+	} {
+		mode, _, err := normalizeRSSWatchRule(tc.mode, tc.rule)
+		if (err != nil) != tc.invalid || mode != tc.want {
+			t.Fatalf("%+v: mode=%q err=%v", tc, mode, err)
+		}
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, rssTestBody(rssTestItem("base", "Initial", "old", "")))
+	}))
+	defer server.Close()
+	store := &stubReminderStore{}
+	runtime := NewRuntime(BotConfig{}, &recordingChannel{}, NewPluginManager(NewRSSWatchPlugin(server.Client())), nil, store, nil, nil)
+	item, err := runtime.CreateRSSWatch(context.Background(), RSSWatchCreateInput{FeedURL: server.URL, UserID: "owner", OwnerID: "owner", RuleMode: "regex", JudgePrompt: "(?i)release"})
+	if err != nil || item.FeedRuleMode != "regex" {
+		t.Fatalf("create=%+v %v", item, err)
+	}
+	bad := "["
+	if _, err := runtime.UpdateRSSWatch(context.Background(), "owner", item.ID, RSSWatchUpdateInput{JudgePrompt: &bad}); err == nil {
+		t.Fatal("invalid regex accepted")
+	}
+	item, err = runtime.UpdateRSSWatch(context.Background(), "owner", item.ID, RSSWatchUpdateInput{Interval: 600 * time.Second})
+	if err != nil || item.FeedRuleMode != "regex" || item.FeedJudgePrompt != "(?i)release" || item.LastFeedItemID != "base" {
+		t.Fatalf("update lost rule/cursor: %+v %v", item, err)
+	}
+	mode := "all"
+	item, err = runtime.UpdateRSSWatch(context.Background(), "owner", item.ID, RSSWatchUpdateInput{RuleMode: &mode})
+	if err != nil || item.FeedRuleMode != "all" || item.FeedJudgePrompt != "" {
+		t.Fatalf("clear=%+v %v", item, err)
+	}
+}
+
+func TestRSSWatchRegexMatchesAllNewEntriesWithoutLLM(t *testing.T) {
+	body := rssTestBody(rssTestItem("4", "ordinary", "skip", ""), rssTestItem("3", "Update", "RELEASE body", ""), rssTestItem("2", "更新 title", "matched body", ""), rssTestItem("1", "ordinary", "skip too", ""), rssTestItem("0", "release", "old", ""))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, body) }))
+	defer server.Close()
+	plugin := NewRSSWatchPlugin(server.Client())
+	calls := 0
+	runtime := NewRuntime(BotConfig{}, &recordingChannel{}, NewPluginManager(plugin), nil, nil, nil, func() (LLMProvider, error) { calls++; return nil, errors.New("unexpected model") })
+	item := Reminder{FeedRuleMode: "regex", FeedJudgePrompt: "(?i)release|更新"}
+	source := ReminderFeedSource{FeedURL: server.URL, LastItemID: "0"}
+	notice, err := runtime.checkRSSWatchSource(context.Background(), item, &source, plugin, SettingValues{rssWatchSettingItemLimit: 1})
+	if err != nil || calls != 0 || source.LastItemID != "4" || !strings.Contains(notice, "RELEASE body") || !strings.Contains(notice, "matched body") || strings.Contains(notice, "skip") || strings.Contains(notice, "old") {
+		t.Fatalf("notice=%q source=%+v calls=%d err=%v", notice, source, calls, err)
+	}
+	source.LastItemID = "0"
+	item.FeedJudgePrompt = "never matches"
+	notice, err = runtime.checkRSSWatchSource(context.Background(), item, &source, plugin, nil)
+	if err != nil || notice != "" || source.LastItemID != "4" {
+		t.Fatalf("no match did not advance: %q %+v %v", notice, source, err)
+	}
+	item.FeedJudgePrompt = "["
+	source.LastItemID = "0"
+	_, err = runtime.checkRSSWatchSource(context.Background(), item, &source, plugin, nil)
+	if err == nil || source.LastItemID != "0" {
+		t.Fatal("invalid stored regex advanced cursor")
 	}
 }

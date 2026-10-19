@@ -649,7 +649,7 @@ let tasks: AssistantTask[] = [
   { id: "task-schedule-02", kind: "schedule", platform: "telegram", owner_id: "880024", user_id: "880024", message: "每天整理 AI 行业资讯并附来源", status: "active", trigger_at: after(180), interval_seconds: 86400, last_run_at: before(1260), created_at: before(4800), consumes_quota: true },
   { id: "task-repo-03", kind: "repository_watch", profile_id: "bot-onebot", platform: "onebot-v11", owner_id: "", group_id: "100200301", message: "Diana 仓库动态", status: "active", trigger_at: after(1), interval_seconds: 60, last_run_at: before(1), repository: "SuInk/Diana", repository_branch: "main", watch_commits: true, watch_pull_requests: true, watch_releases: true, watch_stars: true, last_commit_sha: "26ebc1bed07e9e5b", last_release_tag: "v0.8.6", last_star_count: 128, created_at: before(3800), consumes_quota: true },
   { id: "task-repo-04", kind: "repository_watch", profile_id: "bot-onebot", platform: "onebot-v11", owner_id: "", group_id: "100200418", message: "内部项目动态", status: "active", trigger_at: after(5), interval_seconds: 300, last_run_at: before(4), repository: "acme/secret-lab", repository_branch: "main", repository_display_name: "实验室项目", repository_private: true, repository_masked: true, watch_commits: true, watch_pull_requests: true, watch_releases: false, watch_stars: false, created_at: before(900), consumes_quota: true },
-  { id: "task-rss-04", kind: "rss_watch", platform: "telegram", profile_id: "bot-telegram", owner_id: "", user_id: "880024", message: "Diana Release Feed", status: "active", trigger_at: after(4), interval_seconds: 300, last_run_at: before(4), feed_url: "https://github.com/SuInk/Diana/releases.atom", feed_source: "rss", feed_sources: [{ feed_url: "https://github.com/SuInk/Diana/releases.atom", source: "rss", name: "Diana Release Feed" }], feed_judge_prompt: "仅在稳定版发布时提醒并总结更新点", last_feed_item_id: "tag:github.com,2008:Repository/", created_at: before(2200), consumes_quota: true }
+  { id: "task-rss-04", kind: "rss_watch", platform: "telegram", profile_id: "bot-telegram", owner_id: "", user_id: "880024", message: "Diana Release Feed", status: "active", trigger_at: after(4), interval_seconds: 300, last_run_at: before(4), feed_url: "https://github.com/SuInk/Diana/releases.atom", feed_source: "rss", feed_sources: [{ feed_url: "https://github.com/SuInk/Diana/releases.atom", source: "rss", name: "Diana Release Feed" }], feed_rule_mode: "llm", feed_judge_prompt: "仅在稳定版发布时提醒并总结更新点", feed_reply_prompt: "翻译成中文", feed_media_mode: "video_audio", feed_media_failure: "text", last_feed_item_id: "tag:github.com,2008:Repository/", created_at: before(2200), consumes_quota: true }
 ];
 
 // 与后端 SupportedPlatforms 注册表保持一致：配置向导和机器人页的平台下拉都
@@ -1935,6 +1935,13 @@ async function demoFetch(input: RequestInfo | URL, init?: RequestInit): Promise<
     ].join("\n\n");
     return json({ persona, model: "demo", provider: "demo" });
   }
+  if (path === "/api/llm/rss-assist" && method === "POST") {
+    const kind = String(body.kind ?? "");
+    const request = String(body.request ?? "").trim();
+    if (!request) return json({ error: "请先写一句需求" }, 400);
+    const text = kind === "regex" ? "(?i)release|正式版|稳定版" : kind === "judge" ? `只通知符合“${request}”的条目；排除重复、预告和无关内容。` : `将标题和正文${request}，表达准确简洁，不添加原文没有的信息。`;
+    return json({ text, model: "demo", provider: "demo" });
+  }
   if (path === "/api/assistant/personas" && method === "GET") {
     return json({ personas: demoPersonas, limit: 50 });
   }
@@ -2208,7 +2215,7 @@ async function demoFetch(input: RequestInfo | URL, init?: RequestInit): Promise<
     const demoHandles = [...(Array.isArray(body.twitter_handles) ? body.twitter_handles : []), body.twitter_handle].map((value) => String(value ?? "").trim()).filter(Boolean);
     const demoFeeds = [...(Array.isArray(body.feed_urls) ? body.feed_urls : []), body.feed_url].map((value) => String(value ?? "").trim()).filter(Boolean);
     const demoSources: RSSWatchSource[] = [...demoHandles.map((handle) => ({ feed_url: `https://x.com/${handle}`, source: "twitter" as const, handle })), ...demoFeeds.map((feed_url) => ({ feed_url, source: "rss" as const }))];
-    const task: AssistantTask = { profile_id: String(body.profile_id || ""), notification_targets: (body.notification_targets || []) as import("../api").RepositoryWatchTarget[], id: `task-${Date.now()}`, kind: repository ? "repository_watch" : "rss_watch", platform: "onebot-v11", owner_id: "", group_id: String(body.group_id ?? ""), user_id: String(body.user_id ?? ""), message: String(body.repository ?? demoSources.map((item) => item.handle ? `@${item.handle}` : item.feed_url).join("、") ?? "") || "演示订阅", status: "active", trigger_at: after(1), interval_seconds: Number(body.interval_seconds ?? 60), repository: repository ? String(body.repository ?? "") : undefined, repository_branch: repository ? String(body.branch ?? "main") : undefined, watch_commits: repository ? Boolean(body.watch_commits) : undefined, watch_pull_requests: repository ? Boolean(body.watch_pull_requests) : undefined, watch_releases: repository ? Boolean(body.watch_releases) : undefined, watch_stars: repository ? Boolean(body.watch_stars) : undefined, last_star_count: repository ? 128 : undefined, feed_url: repository ? undefined : demoSources[0]?.feed_url ?? "", feed_handle: repository ? undefined : demoSources[0]?.handle ?? "", feed_source: repository ? undefined : demoSources[0]?.source ?? "rss", feed_sources: repository ? undefined : demoSources, feed_judge_prompt: repository ? undefined : String(body.judge_prompt ?? ""), created_at: new Date().toISOString(), consumes_quota: true };
+    const task: AssistantTask = { profile_id: String(body.profile_id || ""), notification_targets: (body.notification_targets || []) as import("../api").RepositoryWatchTarget[], id: `task-${Date.now()}`, kind: repository ? "repository_watch" : "rss_watch", platform: "onebot-v11", owner_id: "", group_id: String(body.group_id ?? ""), user_id: String(body.user_id ?? ""), message: String(body.repository ?? demoSources.map((item) => item.handle ? `@${item.handle}` : item.feed_url).join("、") ?? "") || "演示订阅", status: "active", trigger_at: after(1), interval_seconds: Number(body.interval_seconds ?? 60), repository: repository ? String(body.repository ?? "") : undefined, repository_branch: repository ? String(body.branch ?? "main") : undefined, watch_commits: repository ? Boolean(body.watch_commits) : undefined, watch_pull_requests: repository ? Boolean(body.watch_pull_requests) : undefined, watch_releases: repository ? Boolean(body.watch_releases) : undefined, watch_stars: repository ? Boolean(body.watch_stars) : undefined, last_star_count: repository ? 128 : undefined, feed_url: repository ? undefined : demoSources[0]?.feed_url ?? "", feed_handle: repository ? undefined : demoSources[0]?.handle ?? "", feed_source: repository ? undefined : demoSources[0]?.source ?? "rss", feed_sources: repository ? undefined : demoSources, feed_reply_prompt: body.reply_prompt == null ? undefined : String(body.reply_prompt), feed_reply_mode: String(body.reply_mode ?? ""), feed_judge_model_id: String(body.judge_model_id ?? ""), feed_translation_model_id: String(body.translation_model_id ?? ""), feed_media_mode: String(body.media_mode ?? "text"), feed_media_failure: String(body.media_failure ?? "retry"), feed_rule_mode: repository ? undefined : String(body.rule_mode ?? ""), feed_judge_prompt: repository ? undefined : String(body.judge_prompt ?? ""), created_at: new Date().toISOString(), consumes_quota: true };
     tasks = [task, ...tasks]; return json(task);
   }
   if (path.includes("/repository-watches/") || path.includes("/rss-watches/") || path.includes("/event-triggers/")) {
@@ -2218,7 +2225,19 @@ async function demoFetch(input: RequestInfo | URL, init?: RequestInit): Promise<
     const task = tasks.find((item) => item.id === taskID) ?? tasks[0];
     if (method === "DELETE") { tasks = tasks.filter((item) => item.id !== taskID); return json({}); }
     if (path.endsWith("/cancel")) task.status = "cancelled";
-    else if (method === "PUT") Object.assign(task, body);
+    else if (method === "PUT") {
+      Object.assign(task, body);
+      if (path.includes("/rss-watches/") && "judge_prompt" in body) {
+        task.feed_judge_prompt = String(body.judge_prompt ?? "");
+        task.feed_rule_mode = String(body.rule_mode ?? task.feed_rule_mode ?? "");
+        task.feed_media_mode = String(body.media_mode ?? task.feed_media_mode ?? "text");
+        if (body.reply_prompt != null) task.feed_reply_prompt = String(body.reply_prompt);
+        task.feed_reply_mode = String(body.reply_mode ?? task.feed_reply_mode ?? "");
+        task.feed_judge_model_id = String(body.judge_model_id ?? task.feed_judge_model_id ?? "");
+        task.feed_translation_model_id = String(body.translation_model_id ?? task.feed_translation_model_id ?? "");
+        task.feed_media_failure = String(body.media_failure ?? task.feed_media_failure ?? "retry");
+      }
+    }
     return json(task);
   }
 
