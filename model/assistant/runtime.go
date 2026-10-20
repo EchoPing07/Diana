@@ -6672,26 +6672,7 @@ func historyLinePrefix(event MessageEvent) string {
 	if event.Time > 0 {
 		label += " " + time.Unix(event.Time, 0).In(profileLocation(event.ProfileID)).Format("2006-01-02 15:04:05")
 	}
-	// 跨群参考放在提示词尾部的易变区，不进缓存前缀，可以直接标出离当前消息多久：
-	// 是刚刚另一个群里的事，还是十几天前的旧话，模型自己掂量。
-	if event.crossGroupContext && event.crossGroupAgeSeconds > 0 {
-		label += "，约" + crossGroupAgeText(event.crossGroupAgeSeconds) + "前"
-	}
 	return label + "] "
-}
-
-// crossGroupAgeText 把秒数写成「5分钟」「3小时」「12天」这样的粗略时长。
-func crossGroupAgeText(seconds int64) string {
-	switch {
-	case seconds < 60:
-		return "1分钟"
-	case seconds < 3600:
-		return fmt.Sprintf("%d分钟", seconds/60)
-	case seconds < 48*3600:
-		return fmt.Sprintf("%d小时", seconds/3600)
-	default:
-		return fmt.Sprintf("%d天", seconds/86400)
-	}
 }
 
 func historicalFileCount(event MessageEvent) int {
@@ -6791,32 +6772,14 @@ func mentionsSomeoneElseFor(event MessageEvent, botID string) bool {
 	return false
 }
 
-// contextMessageTiming 标出消息时间并带上 UTC 偏移：它在易变的尾部，多几个字不影响缓存，
-// 而模型对照它和运行时钟算「刚才」「昨晚」时不该再猜时区。
-func contextMessageTiming(eventTime, currentTime int64, location *time.Location) string {
+// contextMessageTiming 标出消息时间并带上 UTC 偏移，模型对照运行时钟算「刚才」「昨晚」时
+// 不该再猜时区。只写绝对时间，离现在多久由模型对照尾部运行时钟判断：「距当前约 N 分钟」
+// 每轮都变，带着它的整块资料（例如更早的图片索引）在下一轮就成了新字符串。
+func contextMessageTiming(eventTime int64, location *time.Location) string {
 	if eventTime <= 0 {
 		return ""
 	}
-	timing := "【消息时间：" + formatZonedTime(time.Unix(eventTime, 0).In(location), "2006-01-02 15:04:05")
-	if currentTime >= eventTime {
-		timing += "；距当前：" + coarseRelativeTiming(currentTime-eventTime)
-	}
-	return timing + "】"
-}
-
-// coarseRelativeTiming 把「距当前」压到粗粒度。秒级差值会让每一条历史行在每一轮都
-// 变成新字符串，整段历史因此永远无法复用供应商前缀缓存；模型只需要知道大致新旧。
-func coarseRelativeTiming(delta int64) string {
-	switch {
-	case delta < 60:
-		return "不到 1 分钟"
-	case delta < 3600:
-		return fmt.Sprintf("约 %d 分钟", delta/60)
-	case delta < 86400:
-		return fmt.Sprintf("约 %d 小时", delta/3600)
-	default:
-		return fmt.Sprintf("约 %d 天", delta/86400)
-	}
+	return "【消息时间：" + formatZonedTime(time.Unix(eventTime, 0).In(location), "2006-01-02 15:04:05") + "】"
 }
 
 func eventHasSegmentType(event MessageEvent, segmentType string) bool {
