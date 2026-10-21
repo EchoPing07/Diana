@@ -137,6 +137,7 @@ func (r *Runtime) composeMaiBotReply(ctx context.Context, cfg BotConfig, event M
 	if rendered == "" {
 		return draft
 	}
+	rendered = maiBotReplyLines(rendered, cfg, event, intent)
 	if len(mentionIDs) > 0 {
 		markers := make([]string, 0, len(mentionIDs))
 		for _, id := range mentionIDs {
@@ -148,4 +149,41 @@ func (r *Runtime) composeMaiBotReply(ctx context.Context, cfg BotConfig, event M
 		rendered = replyMarkerPrefix + replyID + "]" + rendered
 	}
 	return restoreReplyControlIntent(rendered, intent)
+}
+
+// maiBotReplyLines 把改写稿里的真实换行转成 [diana-line]。改写提示词沿用 MaiBot
+// 原文，不认识 Diana 的换行标记，分点总结会直接写真实换行；后面的版式整理把真实
+// 换行当随手折行压成空格，列表就挤成一行。保留换行时（本轮要求优先，其次是这条
+// 消息的设置，最后是机器人配置，默认保留）才转换；收拢模式照旧交给后面压平。
+// 代码块里的行原样保留：缩进和空行是代码的一部分，去掉了复制出去就跑不了。
+func maiBotReplyLines(rendered string, cfg BotConfig, event MessageEvent, intent replyControlIntent) string {
+	mode := intent.LineBreakMode
+	if mode == "" {
+		mode = event.replyLineBreakMode
+	}
+	if mode == "" && !boolValue(cfg.ReplyPreserveLineBreaks, true) {
+		mode = replyLinesCompact
+	}
+	if mode == replyLinesCompact {
+		return rendered
+	}
+	rendered = strings.ReplaceAll(strings.ReplaceAll(rendered, "\r\n", "\n"), "\r", "\n")
+	var kept []string
+	inFence := false
+	for _, line := range strings.Split(rendered, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "```") {
+			inFence = !inFence
+			kept = append(kept, trimmed)
+			continue
+		}
+		if inFence {
+			kept = append(kept, strings.TrimRight(line, " \t"))
+			continue
+		}
+		if trimmed != "" {
+			kept = append(kept, trimmed)
+		}
+	}
+	return strings.Join(kept, notificationLineMarker)
 }
