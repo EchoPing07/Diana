@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -93,6 +92,23 @@ type consoleGroupSwitchesPayload struct {
 	DisabledMode string `json:"disabled_mode,omitempty"`
 }
 
+// validConsoleGroupID 判断控制台提交的群号能不能当群标识。OneBot 的群号是纯数字，
+// QQ 官方机器人是字母数字的 group_openid，Telegram 带负号，运行时和存储都按不透明
+// 字符串处理，所以只挡空值和混进空白等明显不是标识的写法。
+func validConsoleGroupID(groupID string) bool {
+	if groupID == "" || len(groupID) > 64 {
+		return false
+	}
+	for _, char := range groupID {
+		switch {
+		case char >= '0' && char <= '9', char >= 'a' && char <= 'z', char >= 'A' && char <= 'Z', char == '-', char == '_':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func (h *BotHandler) saveConsoleGroupSwitches(c *gin.Context) {
 	var payload consoleGroupSwitchesPayload
 	if err := c.ShouldBindJSON(&payload); err != nil {
@@ -116,7 +132,7 @@ func (h *BotHandler) saveConsoleGroupSwitches(c *gin.Context) {
 		base := h.botConfigForProfile(profileID)
 		for _, groupID := range payload.GroupIDs {
 			groupID = strings.TrimSpace(groupID)
-			if _, err := strconv.ParseInt(groupID, 10, 64); err != nil {
+			if !validConsoleGroupID(groupID) {
 				continue
 			}
 			cfg, ok := h.groupConfigs.ConfigForGroup(profileID, groupID)
@@ -967,7 +983,7 @@ func (h *BotHandler) saveConsoleGroup(c *gin.Context) {
 		return
 	}
 	groupID := strings.TrimSpace(payload.Config.GroupID)
-	if _, err := strconv.ParseInt(groupID, 10, 64); err != nil {
+	if !validConsoleGroupID(groupID) {
 		h.writeError(c, http.StatusBadRequest, "groups_save", fmt.Errorf("群号格式不正确"), groupID, nil)
 		return
 	}
