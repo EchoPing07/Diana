@@ -104,16 +104,29 @@ func TestConsoleGroupSwitchesNewGroupDefault(t *testing.T) {
 	}
 }
 
-// 群号不是数字的直接跳过，不能让它落进存储。
+// 群号带空白等不是标识的写法直接跳过，不能让它落进存储。
 func TestConsoleGroupSwitchesIgnoresInvalidGroupIDs(t *testing.T) {
 	handler, groups, _ := switchesTestRouter(t)
 
-	if rec := postSwitches(t, handler, `{"bot_profile_id":"a","group_ids":["not-a-group"],"enabled":false}`); rec.Code != http.StatusOK {
+	if rec := postSwitches(t, handler, `{"bot_profile_id":"a","group_ids":["not a group"],"enabled":false}`); rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 
 	if len(groups.Groups().Groups) != 0 {
 		t.Fatalf("非法群号写进了存储：%#v", groups.Groups().Groups)
+	}
+}
+
+// QQ 官方机器人的群标识是字母数字的 group_openid，不是纯数字群号，开关一样要能用。
+func TestConsoleGroupSwitchesAcceptsGroupOpenID(t *testing.T) {
+	handler, groups, _ := switchesTestRouter(t)
+
+	if rec := postSwitches(t, handler, `{"bot_profile_id":"a","group_ids":["1236FE147DDD9055CB36"],"enabled":false}`); rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	if cfg, ok := groups.ConfigForGroup("a", "1236FE147DDD9055CB36"); !ok || cfg.Enabled {
+		t.Fatalf("group_openid 群应当被关掉：%#v ok=%v", cfg, ok)
 	}
 }
 
