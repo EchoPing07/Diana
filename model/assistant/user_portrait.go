@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // 人员画像把「这个人是谁」从一堆聊天原文里固化成可展示、可复用的几栏：住在哪、
@@ -242,6 +243,54 @@ func RemovePortraitField(existing []UserPortraitTrait, field UserPortraitField) 
 		kept = append(kept, trait)
 	}
 	return sortAndCapPortraitTraits(kept), removed
+}
+
+// RemovePortraitValue 只删一栏里值相同的那条，同栏其余条目原样保留。
+func RemovePortraitValue(existing []UserPortraitTrait, field UserPortraitField, value string) ([]UserPortraitTrait, int) {
+	kept := make([]UserPortraitTrait, 0, len(existing))
+	removed := 0
+	for _, trait := range existing {
+		if trait.Field == field && equivalentPortraitValue(trait.Value, value) {
+			removed++
+			continue
+		}
+		kept = append(kept, trait)
+	}
+	return sortAndCapPortraitTraits(kept), removed
+}
+
+// MatchPortraitValues 找出一栏里用户想删的那条。模型转述的措辞常和记下的不完全
+// 一样（「牙齿不太」对「牙齿不太好」），所以先认完全相同，没有再认互相包含的；
+// 包含命中不止一条时宁可不删，交回模型挑准。较短的一方不足
+// minPortraitContainRunes 个字时不认包含，免得一个「猫」字就删掉整条。
+func MatchPortraitValues(existing []UserPortraitTrait, field UserPortraitField, value string) []string {
+	wanted := normalizePortraitMatchText(value)
+	if wanted == "" {
+		return nil
+	}
+	var contained []string
+	for _, trait := range existing {
+		if trait.Field != field {
+			continue
+		}
+		stored := normalizePortraitMatchText(trait.Value)
+		if stored == wanted {
+			return []string{trait.Value}
+		}
+		if min(utf8.RuneCountInString(stored), utf8.RuneCountInString(wanted)) < minPortraitContainRunes {
+			continue
+		}
+		if strings.Contains(stored, wanted) || strings.Contains(wanted, stored) {
+			contained = append(contained, trait.Value)
+		}
+	}
+	return contained
+}
+
+const minPortraitContainRunes = 2
+
+func normalizePortraitMatchText(value string) string {
+	return strings.ToLower(strings.Join(strings.Fields(value), " "))
 }
 
 // sortAndCapPortraitTraits 按栏目顺序重排，并对每栏施加容量上限。

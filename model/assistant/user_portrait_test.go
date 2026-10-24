@@ -188,3 +188,29 @@ func TestUserMemoryContextCarriesPortrait(t *testing.T) {
 		t.Fatalf("发言者标识应当比画像更晚被裁掉: %s", squeezed)
 	}
 }
+
+func TestMatchPortraitValuesPrefersExactAndRejectsAmbiguous(t *testing.T) {
+	traits := []UserPortraitTrait{
+		{Field: PortraitFieldInterest, Value: "打羽毛球"},
+		{Field: PortraitFieldInterest, Value: "看羽毛球比赛"},
+		{Field: PortraitFieldOther, Value: "羽毛球"},
+	}
+	if got := MatchPortraitValues(traits, PortraitFieldInterest, "打羽毛球"); len(got) != 1 || got[0] != "打羽毛球" {
+		t.Fatalf("exact match: %v", got)
+	}
+	if got := MatchPortraitValues(traits, PortraitFieldInterest, "羽毛球"); len(got) != 2 {
+		t.Fatalf("ambiguous containment should surface both: %v", got)
+	}
+	if got := MatchPortraitValues(traits, PortraitFieldInterest, " "); got != nil {
+		t.Fatalf("blank value: %v", got)
+	}
+	// 单个字不认包含，免得「球」就删掉一条。
+	if got := MatchPortraitValues(traits, PortraitFieldOther, "球"); len(got) != 0 {
+		t.Fatalf("single rune should not match by containment: %v", got)
+	}
+	// 存的值里有连续空白，照抄过来也要认得出。
+	spaced := []UserPortraitTrait{{Field: PortraitFieldOther, Value: "住  宿舍"}}
+	if got := MatchPortraitValues(spaced, PortraitFieldOther, "住  宿舍"); len(got) != 1 || got[0] != "住  宿舍" {
+		t.Fatalf("whitespace in stored value: %v", got)
+	}
+}
