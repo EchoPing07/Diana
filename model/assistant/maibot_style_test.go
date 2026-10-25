@@ -113,3 +113,60 @@ func TestMaiBotStyleConfigRoundTripAndCustomStyle(t *testing.T) {
 		t.Fatal("custom or default style was not selected")
 	}
 }
+
+// 生产回放：草稿分成清单、结论、来源三条，改写稿用空行分段。改写只换措辞，三条
+// 还得是三条，句子之间的句号也不能被换成空格。
+func TestMaiBotReplyerKeepsDraftMessagesAndLayout(t *testing.T) {
+	cfg := (BotConfig{ReplyComposer: "maibot", SystemPrompt: "身份", BotAccount: "bot"}).WithDefaults()
+	cfg.AgentEnabled = false
+	draft := "Mac Studio 各代内存带宽：[diana-line]- 2022 款：M1 Max 400GB/s[diana-line]- 2023 款：M2 Max 400GB/s[diana-msg]规律很明显。[diana-msg]来源：[diana-line]https://support.apple.com/en-us/111900"
+	rendered := "查了下 Apple 官方规格页，Mac Studio 各代内存带宽：\n\n- 2022 款：M1 Max 400GB/s\n- 2023 款：M2 Max 400GB/s\n\n规律挺明显，Max 档一直卡在 400 上下，Ultra 双芯拼接直接翻倍到 800 档；M4 Max 高配涨到 546，还是被丐版 M3 Ultra 的 819 压着。跑大模型吃带宽的话 Ultra 依然独一档\n\n来源：\nhttps://support.apple.com/en-us/111900"
+	provider := &maiBotStyleTestProvider{responses: []string{draft, rendered}}
+	runtime := NewRuntime(cfg, nilChannel{}, NewPluginManager(), nil, nil, nil, func() (LLMProvider, error) { return provider, nil })
+	event := MessageEvent{Kind: EventKindPrivate, MessageID: "71", UserID: "10001", SenderName: "群友", RawMessage: "查下mac studio各个版本的内存带宽"}
+	messages := []llm.Message{{Role: llm.RoleUser, Content: event.RawMessage, Priority: llm.MessagePriorityCurrent}}
+	reply, err := runtime.generateReply(context.Background(), cfg, event, RelationshipPolicy{}, messages, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reference string
+	for _, message := range provider.requests[1].Messages {
+		if strings.Contains(message.Content, "规律很明显") {
+			reference = message.Content
+		}
+	}
+	if strings.Contains(reference, "[diana-") || !strings.Contains(reference, "400GB/s\n\n规律很明显") || !strings.Contains(reference, "\n- 2023 款") {
+		t.Fatalf("replyer reference kept raw markers or lost layout: %q", reference)
+	}
+	bubbles := splitChatReply(reply, chatSplitLimits{})
+	if len(bubbles) != 3 {
+		t.Fatalf("bubbles = %q, want list, conclusion and sources", bubbles)
+	}
+	if !strings.Contains(bubbles[0], "内存带宽：\n• 2022 款") || !strings.Contains(bubbles[1], "压着。跑大模型") || !strings.Contains(bubbles[2], "来源：\nhttps://") {
+		t.Fatalf("bubbles lost layout: %q", bubbles)
+	}
+}
+
+// 草稿只有一条时，改写稿的空行不能凭空多拆出几条。
+func TestMaiBotReplyLinesKeepsSingleDraftInOneMessage(t *testing.T) {
+	got := maiBotReplyLines("第一段\n\n第二段", DefaultBotConfig(), MessageEvent{}, replyControlIntent{}, []string{"第一段第二段"})
+	if got != "第一段"+notificationLineMarker+"第二段" {
+		t.Fatalf("maiBotReplyLines() = %q", got)
+	}
+}
+
+// swe-2 生产回放的真实输出：清单每项之间都空一行。按草稿对齐，清单仍是一条，
+// 结论和来源各一条，不能拆成五个气泡。
+func TestMaiBotReplyLinesAlignsParagraphsToDraftMessages(t *testing.T) {
+	draft := []string{
+		"Mac Studio 各代内存带宽（Apple 官方规格页）：[diana-line]2022 款：M1 Max 400GB/s，M1 Ultra 800GB/s[diana-line]2023 款：M2 Max 400GB/s，M2 Ultra 800GB/s[diana-line]2025 款：M4 Max 410GB/s（14 核 CPU 版）/ 546GB/s（16 核 CPU 高配版），M3 Ultra 819GB/s",
+		"规律很明显：Max 档一直卡在 400 上下，Ultra 靠双芯拼接直接翻倍到 800 档；M4 Max 高配总算涨到 546，但还是被丐版 M3 Ultra 的 819 压着打，跑大模型吃带宽的话 Ultra 依然是独一档。",
+		"来源：Apple Support 技术规格页[diana-line]https://support.apple.com/en-us/111900[diana-line]https://support.apple.com/en-us/111835",
+	}
+	rendered := "查了苹果官网的规格页，各代 Mac Studio 内存带宽：\n\n**2022 款**：M1 Max 400GB/s，M1 Ultra 800GB/s\n\n**2023 款**：M2 Max 400GB/s，M2 Ultra 800GB/s\n\n**2025 款**：M4 Max 410GB/s（14 核 CPU 版）/ 546GB/s（16 核高配版），M3 Ultra 819GB/s\n\n规律很明显，Max 档一直卡在 400 上下，Ultra 靠双芯拼接直接翻倍到 800 档。M4 Max 高配涨到 546，但还是被丐版 M3 Ultra 的 819 压着\n\n来源是 Apple Support 规格页：\nhttps://support.apple.com/en-us/111900\nhttps://support.apple.com/en-us/111835"
+	got := maiBotReplyLines(rendered, DefaultBotConfig(), MessageEvent{}, replyControlIntent{}, draft)
+	messages := strings.Split(got, notificationSplitMarker)
+	if len(messages) != 3 || strings.Count(messages[0], notificationLineMarker) != 3 || !strings.HasPrefix(messages[1], "规律") || !strings.HasPrefix(messages[2], "来源") {
+		t.Fatalf("maiBotReplyLines() = %q", messages)
+	}
+}

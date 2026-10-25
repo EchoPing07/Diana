@@ -5,7 +5,9 @@ package assistant
 import (
 	"context"
 	"log"
+	"math"
 	"strings"
+	"unicode"
 
 	"github.com/SuInk/diana/internal/maibotreply"
 	"github.com/SuInk/diana/model/llm"
@@ -72,7 +74,7 @@ func (r *Runtime) maiBotReplyerMessages(cfg BotConfig, event MessageEvent, sourc
 		Identity:          maibotreply.PersonalityPrompt(firstNonEmpty(cfg.Name, "Diana"), cfg.GroupTriggers, identity),
 		Style:             maiBotStyle(cfg),
 		Attention:         maiBotAttention(event),
-		OutputInstruction: joinPromptSections(maiBotReferenceBoundary, maiBotReplyerOutput),
+		OutputInstruction: joinPromptSections(maiBotReferenceBoundary, maiBotReferenceLayout, maiBotReplyerOutput),
 		History:           plain,
 		Target:            r.maiBotTarget(cfg, event),
 		Time:              r.clock(),
@@ -112,7 +114,12 @@ func (r *Runtime) composeMaiBotReply(ctx context.Context, cfg BotConfig, event M
 		return draft
 	}
 
-	request := r.maiBotReplyerMessages(cfg, event, messages, body)
+	// 改写提示词不认识 Diana 的分条和换行标记，原样塞进去它只会当成一串字面量，
+	// 草稿分好的几条消息和清单行就被揉成一段。换成真实的空行和换行再给它看。
+	draftParts := strings.Split(body, notificationSplitMarker)
+	reference := strings.ReplaceAll(body, notificationSplitMarker, "\n\n")
+	reference = restoreExplicitReplyLines(reference)
+	request := r.maiBotReplyerMessages(cfg, event, messages, reference)
 	callCtx := withLLMUsagePurpose(ctx, PurposeReplyTone)
 	rendered, err := r.runLLMProviderForGroup(callCtx, llm.GroupChat, func(client LLMProvider) (string, error) {
 		response, err := client.Generate(callCtx, llm.GenerateRequest{Messages: request})
@@ -137,7 +144,7 @@ func (r *Runtime) composeMaiBotReply(ctx context.Context, cfg BotConfig, event M
 	if rendered == "" {
 		return draft
 	}
-	rendered = maiBotReplyLines(rendered, cfg, event, intent)
+	rendered = maiBotReplyLines(rendered, cfg, event, intent, draftParts)
 	if len(mentionIDs) > 0 {
 		markers := make([]string, 0, len(mentionIDs))
 		for _, id := range mentionIDs {
@@ -156,7 +163,12 @@ func (r *Runtime) composeMaiBotReply(ctx context.Context, cfg BotConfig, event M
 // 换行当随手折行压成空格，列表就挤成一行。保留换行时（本轮要求优先，其次是这条
 // 消息的设置，最后是机器人配置，默认保留）才转换；收拢模式照旧交给后面压平。
 // 代码块里的行原样保留：缩进和空行是代码的一部分，去掉了复制出去就跑不了。
-func maiBotReplyLines(rendered string, cfg BotConfig, event MessageEvent, intent replyControlIntent) string {
+//
+// 分几条是内容那一轮定的，改写只换措辞。草稿分成了几条（draftParts 多于一条）时，
+// 改写稿按空行切成段落，每段对回草稿里最像的那一条，对到的条目变了才另起一条。
+// 不能直接把空行当分界：改写模型常在清单每一项之间都空一行，那样一份三行的清单
+// 会被拆成三个气泡。草稿只有一条时空行照旧丢掉，不凭空多拆。
+func maiBotReplyLines(rendered string, cfg BotConfig, event MessageEvent, intent replyControlIntent, draftParts []string) string {
 	mode := intent.LineBreakMode
 	if mode == "" {
 		mode = event.replyLineBreakMode
@@ -168,22 +180,94 @@ func maiBotReplyLines(rendered string, cfg BotConfig, event MessageEvent, intent
 		return rendered
 	}
 	rendered = strings.ReplaceAll(strings.ReplaceAll(rendered, "\r\n", "\n"), "\r", "\n")
-	var kept []string
-	inFence := false
+	var paragraphs [][]string
+	inFence, pendingBreak := false, true
+	add := func(line string) {
+		if pendingBreak {
+			paragraphs = append(paragraphs, nil)
+			pendingBreak = false
+		}
+		paragraphs[len(paragraphs)-1] = append(paragraphs[len(paragraphs)-1], line)
+	}
 	for _, line := range strings.Split(rendered, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "```") {
 			inFence = !inFence
-			kept = append(kept, trimmed)
+			add(trimmed)
 			continue
 		}
 		if inFence {
-			kept = append(kept, strings.TrimRight(line, " \t"))
+			add(strings.TrimRight(line, " \t"))
 			continue
 		}
-		if trimmed != "" {
-			kept = append(kept, trimmed)
+		if trimmed == "" {
+			pendingBreak = true
+			continue
+		}
+		add(trimmed)
+	}
+	parts := alignReplyParagraphs(paragraphs, draftParts)
+	var out strings.Builder
+	for index, paragraph := range paragraphs {
+		if index > 0 {
+			if parts[index] != parts[index-1] {
+				out.WriteString(notificationSplitMarker)
+			} else {
+				out.WriteString(notificationLineMarker)
+			}
+		}
+		out.WriteString(strings.Join(paragraph, notificationLineMarker))
+	}
+	return out.String()
+}
+
+// alignReplyParagraphs 给每个段落找它对应草稿里的第几条：按字的二元组算余弦相似度
+// 取最像的那条（除以两边规模，长条目不会单凭字多压过短条目），只许往后对不许往回，
+// 和哪条都不沾边的段落跟着上一段。
+func alignReplyParagraphs(paragraphs [][]string, draftParts []string) []int {
+	parts := make([]int, len(paragraphs))
+	if len(draftParts) < 2 {
+		return parts
+	}
+	drafts := make([]map[string]bool, len(draftParts))
+	for index, part := range draftParts {
+		drafts[index] = textBigrams(part)
+	}
+	current := 0
+	for index, paragraph := range paragraphs {
+		grams := textBigrams(strings.Join(paragraph, "\n"))
+		best, bestScore := current, 0.0
+		for candidate := current; candidate < len(drafts); candidate++ {
+			shared := 0
+			for gram := range grams {
+				if drafts[candidate][gram] {
+					shared++
+				}
+			}
+			if shared == 0 {
+				continue
+			}
+			score := float64(shared) / math.Sqrt(float64(len(grams)*len(drafts[candidate])))
+			if score > bestScore {
+				best, bestScore = candidate, score
+			}
+		}
+		current = best
+		parts[index] = current
+	}
+	return parts
+}
+
+func textBigrams(text string) map[string]bool {
+	var runes []rune
+	for _, r := range strings.ToLower(text) {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			runes = append(runes, r)
 		}
 	}
-	return strings.Join(kept, notificationLineMarker)
+	grams := make(map[string]bool, len(runes))
+	for index := 1; index < len(runes); index++ {
+		grams[string(runes[index-1:index+1])] = true
+	}
+	return grams
 }
