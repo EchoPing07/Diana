@@ -5,6 +5,8 @@ package assistant
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -17,10 +19,11 @@ func TestOutgoingLocalImagePathsAreSharedBeforeSend(t *testing.T) {
 	runtime := NewRuntime(BotConfig{}, channel, NewPluginManager(), nil, nil, nil, nil)
 	sharer := &recordingLocalMediaSharer{url: "https://share.example/img.jpg"}
 	runtime.SetLocalMediaSharer(sharer)
-	event := MessageEvent{Kind: EventKindGroup, GroupID: "20005", UserID: "10001", MessageID: "m1"}
+	event := MessageEvent{Platform: PlatformOneBotV11, Kind: EventKindGroup, GroupID: "20005", UserID: "10001", MessageID: "m1"}
+	local := writeLocalImage(t, "image.jpg")
 
 	err := runtime.sendOutgoing(context.Background(), event, OutgoingMessage{
-		ImageURLs: []string{"file:///var/folders/tmp/diana-resolver-image-1/image.jpg", "https://cdn.example/keep.png"},
+		ImageURLs: []string{local, "https://cdn.example/keep.png"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -44,15 +47,54 @@ func TestOutgoingLocalImagePathsAreSharedBeforeSend(t *testing.T) {
 func TestOutgoingLocalImagePathsKeptWithoutSharer(t *testing.T) {
 	channel := &recordingChannel{}
 	runtime := NewRuntime(BotConfig{}, channel, NewPluginManager(), nil, nil, nil, nil)
-	event := MessageEvent{Kind: EventKindGroup, GroupID: "20005", UserID: "10001", MessageID: "m1"}
+	event := MessageEvent{Platform: PlatformOneBotV11, Kind: EventKindGroup, GroupID: "20005", UserID: "10001", MessageID: "m1"}
+	local := writeLocalImage(t, "image.jpg")
 
 	if err := runtime.sendOutgoing(context.Background(), event, OutgoingMessage{
-		ImageURLs: []string{"/var/folders/tmp/diana-resolver-image-1/image.jpg"},
+		ImageURLs: []string{local},
 	}); err != nil {
 		t.Fatal(err)
 	}
 	sent := channel.sentSnapshot()
-	if len(sent) != 1 || sent[0].ImageURLs[0] != "/var/folders/tmp/diana-resolver-image-1/image.jpg" {
+	if len(sent) != 1 || sent[0].ImageURLs[0] != local {
 		t.Fatalf("无共享器时应保留原路径:%#v", sent)
 	}
+}
+
+// 只给走桥的 OneBot v11 换分享地址。Telegram、QQ 官方、微信、iMessage 都由后端
+// 自己读字节上传，换成指向 127.0.0.1 的分享地址后，它们下载时走公网客户端、被
+// SSRF 防护拒掉，图片一张也发不出去。
+func TestOutgoingLocalImagePathsKeptForSameProcessChannels(t *testing.T) {
+	for _, platform := range []string{PlatformTelegram, PlatformQQOfficial, PlatformWeixin, PlatformIMessage} {
+		t.Run(platform, func(t *testing.T) {
+			channel := &recordingChannel{}
+			runtime := NewRuntime(BotConfig{}, channel, NewPluginManager(), nil, nil, nil, nil)
+			sharer := &recordingLocalMediaSharer{url: "http://127.0.0.1:18080/media/resolver/452ac2d2"}
+			runtime.SetLocalMediaSharer(sharer)
+			path := writeLocalImage(t, "sticker.gif")
+			event := MessageEvent{Platform: platform, Kind: EventKindGroup, GroupID: "g1", UserID: "u1", MessageID: "m1"}
+
+			if err := runtime.sendOutgoing(context.Background(), event, OutgoingMessage{ImageURLs: []string{path}}); err != nil {
+				t.Fatal(err)
+			}
+			sent := channel.sentSnapshot()
+			if len(sent) != 1 || sent[0].ImageURLs[0] != path {
+				t.Fatalf("%s 应保留本地路径:%#v", platform, sent)
+			}
+			if len(sharer.paths) != 0 {
+				t.Fatalf("%s 不应经过共享器:%#v", platform, sharer.paths)
+			}
+		})
+	}
+}
+
+// writeLocalImage 在临时目录里造一张图片并返回绝对路径。文件要真写出来：出站链路会
+// 读它算平台图片标识，路径不存在时每次都要等满等待窗口，用例会慢上几秒。
+func writeLocalImage(t *testing.T, name string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, []byte("gif"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
