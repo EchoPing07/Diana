@@ -1087,22 +1087,28 @@ type qqOfficialAttachment struct {
 }
 
 var (
-	// qqFaceTagPattern 匹配 content 里的表情标签，实到过两种形态：表情商城的
-	// <faceType=4,faceId="",ext="…">，以及系统表情的 <faceType=6,faceId="0",ext="…">。
+	// qqFaceTagPattern 匹配 content 里的表情标签，探针实测三类：原生 emoji 的
+	// <faceType=1,faceId="317",ext="…">、表情商城的 <faceType=4,faceId="",ext="…">，
+	// 以及表情包的 <faceType=6,faceId="0",ext="…">。
 	qqFaceTagPattern = regexp.MustCompile(`<faceType=\d+[^>]*>`)
 	// qqFaceExtPattern 从单个表情标签里抠出 base64 的 ext 字段。
 	qqFaceExtPattern = regexp.MustCompile(`ext="([^"]*)"`)
+	// qqStickerFaceTagPattern 匹配表情包标签：只有 faceType=6 的图案是附件图，
+	// 原生 emoji 和商城表情都不是。
+	qqStickerFaceTagPattern = regexp.MustCompile(`<faceType=6,[^>]*>`)
 )
 
 // qqOfficialFaceText 把 content 里的表情标签翻成可读文本。
 //
-// 名字只藏在标签的 ext 里：base64 解开是 JSON，text 字段就是表情名，名字自带方括号
-// （如 [吃芒果]）。原样透传会把一串协议码带进模型上下文，翻成 [表情:[吃芒果]] 模型
-// 才分得清表情和正文里写的字。名字取不到时（ext 里的 text 为空，或标签里根本没有
-// ext）退回 [表情]，至少让模型知道这里有个表情。
+// 名字只藏在标签的 ext 里：base64 解开是 JSON，text 字段就是表情名。商店表情和
+// 表情配文的名字自带方括号（如 [吃芒果]），原生 emoji 的不带（如菜汪）。原样透传
+// 会把一串协议码带进模型上下文，翻成 [表情:菜汪] 模型才分得清表情和正文里写的字。
+// 名字取不到时（ext 里的 text 为空，或标签里根本没有 ext）退回 [表情]，至少让模型
+// 知道这里有个表情。
 //
-// 表情图不在这里：官方对表情商城这类只给名字、不给图，自家表情则是空名标签配一张
-// 附件图，图案由 qqOfficialMediaSegments 单独拆成图片段，这个占位不代替它。
+// 表情图不在这里：商店表情官方只给名字、不给图，表情包（相册直传、表情配文）的
+// 图案则是标签外的附件图，由 qqOfficialMediaSegments 单独拆成图片段，这个占位不代
+// 替它。
 func qqOfficialFaceText(content string) string {
 	if !strings.Contains(content, "<faceType") {
 		return content
@@ -1134,6 +1140,23 @@ func qqOfficialFaceTagName(tag string) string {
 	return strings.TrimSpace(payload.Text)
 }
 
+// qqOfficialStickerFace 认出 content 里的表情包标签，并解出它的名字（可能为空）。
+// 表情包标签是 faceType=6，图案不在标签里而在附件里。名字为空是用户上传的图
+// （相册直传或转存别人发的），带方括号（如 [吃饭]）是输入框关键词推荐的「表情配文」。
+//
+// 其余标签不是表情包：原生 emoji（faceType=1，名字不带方括号，如菜汪）算文本，
+// 可以和普通配图同发，配图不能进表情包库；商店表情（faceType=4）只给名字、不给图。
+//
+// content 必须是未经 qqOfficialFaceText 转换的原文：标签一旦被替换成 [表情] 占位就
+// 认不出来了。
+func qqOfficialStickerFace(content string) (name string, isSticker bool) {
+	tag := qqStickerFaceTagPattern.FindString(content)
+	if tag == "" {
+		return "", false
+	}
+	return qqOfficialFaceTagName(tag), true
+}
+
 // qqOfficialMediaSegments 把附件拆成消息段，紧跟正文段之后。官方事件的富媒体全在
 // attachments 里、content 只剩文字；不拆成消息段，这些媒体不会进入后续链路。
 //
@@ -1141,8 +1164,8 @@ func qqOfficialFaceTagName(tag string) string {
 // asr_refer_text 转写（有转写时不必再跑本地语音识别）；其余（裸值 file，md/zip/mp3
 // 这类）落成文件段，文件名和大小留给文件解析插件。
 //
-// 自家表情也走图片段这条路：content 是空名的 <faceType=…> 标签（正文只剩 [表情]
-// 占位），图案本体就是附件图，所以入站不会被当成纯文字消息。
+// 表情包也走图片段这条路：content 只剩 <faceType=6,…> 标签（正文是 [表情] 占位），
+// 图案本体就是附件图，所以入站不会被当成纯文字消息。
 func qqOfficialMediaSegments(attachments []qqOfficialAttachment) []MessageSegment {
 	var segments []MessageSegment
 	for _, attachment := range attachments {
@@ -1391,7 +1414,21 @@ func qqOfficialEventFromDispatch(eventType string, data json.RawMessage, selfID 
 	text, mergedMedia := qqOfficialMergedForwardMedia(text)
 	segments := platformTextSegments(text, quoted)
 	segments = append(segments, mergedMedia...)
-	segments = append(segments, qqOfficialMediaSegments(msg.Attachments)...)
+	mediaSegments := qqOfficialMediaSegments(msg.Attachments)
+	// 附件图补上 sub_type=1 才会被 StickerSegmentLabel 认成表情包、收进表情包库，
+	// 解出名字的再写进 summary 当检索名。
+	if faceName, isSticker := qqOfficialStickerFace(msg.Content); isSticker {
+		for i := range mediaSegments {
+			if mediaSegments[i].Type != "image" {
+				continue
+			}
+			mediaSegments[i].Data["sub_type"] = "1"
+			if faceName != "" {
+				mediaSegments[i].Data["summary"] = faceName
+			}
+		}
+	}
+	segments = append(segments, mediaSegments...)
 	event := MessageEvent{
 		Platform:    PlatformQQOfficial,
 		Time:        platformEventTime(msg.Timestamp),
