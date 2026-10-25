@@ -999,9 +999,11 @@ func (r *Runtime) resolveOutgoingLocalImages(msg OutgoingMessage) OutgoingMessag
 	if len(msg.ImageURLs) == 0 && len(msg.Segments) == 0 {
 		return msg
 	}
-	// TelegramChannel 与后端在同一进程，绝对路径应直接走 multipart 上传；换成
-	// WebUI 分享 URL 后 Telegram 服务器可能拿到登录页或代理错误页并报媒体类型错误。
-	if NormalizePlatformID(msg.Platform) == PlatformTelegram {
+	// 只有走桥的 OneBot v11 需要分享地址。其余通道都由本进程自己读字节上传
+	// （Telegram 走 multipart、QQ 官方分片上传、微信和 iMessage 直接读本地文件），
+	// 分享地址指向 127.0.0.1，它们下载时走公网客户端、会被 SSRF 防护拒掉，
+	// 表情包和本地图片一张都发不出去。
+	if !IsOneBotPlatform(msg.Platform) {
 		return msg
 	}
 	// 图片消息段（例如按 QQ 表情包形式发的 sub_type=1）里的本地路径同样要换成分享地址：

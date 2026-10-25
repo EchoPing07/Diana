@@ -485,8 +485,8 @@ func TestQQOfficialFaceTextDecodesNames(t *testing.T) {
 	}
 }
 
-// 自家表情是空名标签配一张附件图：正文只剩 [表情] 占位，图必须单独拆出来，
-// 否则这条入站就等于纯文字。
+// 用户上传的表情（相册直传或转存别人发的）是空名标签配一张附件图：正文只剩 [表情]
+// 占位，图要单独拆出来，并补上 sub_type=1 才会被认成表情包进库。
 func TestQQOfficialSelfMadeStickerKeepsImageBesidePlaceholder(t *testing.T) {
 	data := json.RawMessage(`{
 	  "id":"msg-11","content":"<faceType=6,faceId=\"0\",ext=\"eyJ0ZXh0IjoiIn0=\">",
@@ -504,10 +504,109 @@ func TestQQOfficialSelfMadeStickerKeepsImageBesidePlaceholder(t *testing.T) {
 	for _, segment := range event.Segments {
 		if segment.Type == "image" {
 			images++
+			if segment.Data["sub_type"] != "1" {
+				t.Fatalf("image segment data = %v, want sub_type=1 so it enters the sticker library", segment.Data)
+			}
+			label, isSticker := StickerSegmentLabel(segment)
+			if !isSticker || label != "动画表情" {
+				t.Fatalf("image segment data = %v, got label (%q, %v), want generic 动画表情", segment.Data, label, isSticker)
+			}
 		}
 	}
 	if images != 1 {
 		t.Fatalf("segments = %+v, want the sticker image kept", event.Segments)
+	}
+}
+
+// 表情配文（输入框关键词推荐的表情）带名字配图：标签 ext 里有名字，附件图入库时
+// 名字要写进 summary 当检索名，收录后按名字能搜到这张图。
+func TestQQOfficialNamedStickerImageCarriesSummary(t *testing.T) {
+	data := json.RawMessage(`{
+	  "id":"msg-13","content":"<faceType=6,faceId=\"0\",ext=\"eyJ0ZXh0IjoiW+eUn+awlF0ifQ==\">",
+	  "group_openid":"grp-1","author":{"member_openid":"member-1"},
+	  "attachments":[{"content_type":"image/jpeg","filename":"a.jpg","url":"https://multimedia.nt.qq.com.cn/download?fileid=x"}]
+	}`)
+	event, ok := qqOfficialEventFromDispatch("GROUP_MESSAGE_CREATE", data, "bot-1")
+	if !ok {
+		t.Fatal("sticker message was not mapped")
+	}
+	for _, segment := range event.Segments {
+		if segment.Type != "image" {
+			continue
+		}
+		if segment.Data["sub_type"] != "1" || segment.Data["summary"] != "[生气]" {
+			t.Fatalf("image segment data = %v, want sub_type=1 and summary=[生气]", segment.Data)
+		}
+		label, isSticker := StickerSegmentLabel(segment)
+		if !isSticker || label != "生气" {
+			t.Fatalf("image segment data = %v, got label (%q, %v), want the sticker name", segment.Data, label, isSticker)
+		}
+	}
+}
+
+// 普通图片不标成表情包：配图消息可以没有表情标签，也可以带原生 emoji（faceType=1，
+// 算文本）——emoji 配的图就是普通图片，混进表情包库会被当成表情发出去。
+func TestQQOfficialPlainImageIsNotMarkedAsSticker(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+	}{
+		{name: "captioned image", content: "看这张"},
+		{name: "classic face beside image", content: `<faceType=1,faceId="76">`},
+		{name: "native emoji beside image", content: `<faceType=1,faceId="317",ext="eyJ0ZXh0Ijoi6I+c5rGqIn0=">`},
+		{name: "mall sticker beside image", content: `<faceType=4,faceId="",ext="eyJ0ZXh0IjoiW+WQg+mlrV0ifQ==">`},
+	}
+	for _, testCase := range cases {
+		payload, err := json.Marshal(map[string]any{
+			"id":           "msg-12",
+			"content":      testCase.content,
+			"group_openid": "grp-1",
+			"author":       map[string]string{"member_openid": "member-1"},
+			"attachments":  []map[string]string{{"content_type": "image/jpeg", "filename": "a.jpg", "url": "https://multimedia.nt.qq.com.cn/download?fileid=x"}},
+		})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		event, ok := qqOfficialEventFromDispatch("GROUP_MESSAGE_CREATE", payload, "bot-1")
+		if !ok {
+			t.Fatalf("%s: message was not mapped", testCase.name)
+		}
+		for _, segment := range event.Segments {
+			if segment.Type != "image" {
+				continue
+			}
+			if segment.Data["sub_type"] != "" {
+				t.Fatalf("%s: image segment data = %v, want no sticker marker", testCase.name, segment.Data)
+			}
+			if _, isSticker := StickerSegmentLabel(segment); isSticker {
+				t.Fatalf("%s: image segment data = %v, want treated as a plain image", testCase.name, segment.Data)
+			}
+		}
+	}
+}
+
+// 引用消息里的表情包附件图补不进标记：qqOfficialQuotedPayload 拿到的 content 已经
+// 被 qqOfficialFaceText 换成了 [表情] 占位，认不出表情标签。这里钉住现状，改动这条
+// 链路时先决定引用里的表情要不要也进表情包库。
+func TestQQOfficialQuotedStickerImageStaysPlain(t *testing.T) {
+	data := json.RawMessage(`{
+	  "id":"msg-14","content":"看这个","message_type":103,
+	  "group_openid":"grp-1","author":{"member_openid":"member-1"},
+	  "message_scene":{"ext":["ref_msg_idx=REFIDX_x"]},
+	  "msg_elements":[{"content":"<faceType=6,faceId=\"0\",ext=\"eyJ0ZXh0IjoiIn0=\">",
+	    "attachments":[{"content_type":"image/jpeg","filename":"a.jpg","url":"https://multimedia.nt.qq.com.cn/download?fileid=x"}]}]
+	}`)
+	event, ok := qqOfficialEventFromDispatch("GROUP_MESSAGE_CREATE", data, "bot-1")
+	if !ok || event.Quoted == nil {
+		t.Fatal("quoted message was not mapped")
+	}
+	for _, segment := range event.Quoted.Segments {
+		if segment.Type != "image" {
+			continue
+		}
+		if segment.Data["sub_type"] != "" {
+			t.Fatalf("quoted image segment data = %v, want no sticker marker", segment.Data)
+		}
 	}
 }
 
