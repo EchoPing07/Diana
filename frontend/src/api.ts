@@ -4651,7 +4651,7 @@ export interface DesktopJob {
   status: string;
   wait_reason?: string;
   error?: string;
-  budget: { steps_used: number; max_steps: number };
+  budget: { steps_used: number };
 }
 export interface DesktopActionApproval {
  target_label?: string;
@@ -4668,6 +4668,7 @@ export interface DesktopStatus {
   policy: DesktopPolicy;
   ready: boolean;
   helper_configured: boolean;
+  executor?: string;
   detail: string;
   connections: { id: string; takeover: boolean }[];
 }
