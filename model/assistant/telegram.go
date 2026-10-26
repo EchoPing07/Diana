@@ -41,6 +41,8 @@ const (
 	telegramPollTimeoutSeconds = 30
 	// 单次上传体积上限，Bot API 对普通 bot 的限制是 50MB。
 	telegramMaxUploadBytes = 50 << 20
+	// telegramCloudDownloadLimit 是官方 Bot API getFile 能下载的上限。
+	telegramCloudDownloadLimit = 20 << 20
 )
 
 // TelegramChannel 通过官方 Bot API 长轮询接入 Telegram。
@@ -350,6 +352,11 @@ func (c *TelegramChannel) SendWithResult(ctx context.Context, msg OutgoingMessag
 	if chatID == "" {
 		return nil, fmt.Errorf("telegram: missing chat id")
 	}
+	msg, cleanup, err := materializeTelegramInlineMedia(msg)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
 	if msg.ImageAlbum {
 		return c.sendPhotoAlbum(ctx, msg, chatID)
 	}
@@ -533,6 +540,65 @@ func (c *TelegramChannel) sendMedia(ctx context.Context, chatID, threadID, metho
 		return nil, fmt.Errorf("telegram: 媒体 %.1fMB 超过 Bot API 50MB 上传限制", float64(info.Size())/(1<<20))
 	}
 	return c.uploadMedia(ctx, method, chatID, threadID, field, path, replyIDs...)
+}
+
+// materializeTelegramInlineMedia 把 data URI / base64:// 媒体落成临时文件。
+//
+// Telegram 不认内联数据：既不是 URL 也不是本地文件的字符串会被当成 file_id，
+// 结果是「wrong remote file identifier specified: Wrong padding length」。各个
+// 调用方（关系图、渲染图、插件）都按 OneBot 的习惯交 data URI，在通道这一层统一
+// 换成文件走 multipart，比要求每个入口各自记得转换可靠。
+func materializeTelegramInlineMedia(msg OutgoingMessage) (OutgoingMessage, func(), error) {
+	dir := ""
+	cleanup := func() {
+		if dir != "" {
+			_ = os.RemoveAll(dir)
+		}
+	}
+	convert := func(sources []string, kind string) ([]string, error) {
+		var out []string
+		for index, source := range sources {
+			trimmed := strings.TrimSpace(source)
+			if !strings.HasPrefix(trimmed, "data:") && !strings.HasPrefix(trimmed, "base64://") {
+				continue
+			}
+			body, err := decodeBase64MediaSource(trimmed, telegramMaxUploadBytes)
+			if err != nil {
+				return nil, fmt.Errorf("telegram: 内联%s数据无效或超过 50MB", kind)
+			}
+			if dir == "" {
+				if dir, err = os.MkdirTemp("", "diana-telegram-inline-*"); err != nil {
+					return nil, err
+				}
+			}
+			path := filepath.Join(dir, fmt.Sprintf("%s-%d%s", kind, index, imessageExtensionFor(http.DetectContentType(body))))
+			if err := os.WriteFile(path, body, 0o600); err != nil {
+				return nil, err
+			}
+			if out == nil {
+				out = append([]string(nil), sources...)
+			}
+			out[index] = path
+		}
+		if out == nil {
+			return sources, nil
+		}
+		return out, nil
+	}
+	var err error
+	if msg.ImageURLs, err = convert(msg.ImageURLs, "image"); err != nil {
+		cleanup()
+		return msg, func() {}, err
+	}
+	if msg.VideoURLs, err = convert(msg.VideoURLs, "video"); err != nil {
+		cleanup()
+		return msg, func() {}, err
+	}
+	if msg.AudioURLs, err = convert(msg.AudioURLs, "audio"); err != nil {
+		cleanup()
+		return msg, func() {}, err
+	}
+	return msg, cleanup, nil
 }
 
 // telegramLocalPath 判断出站地址是否指向本机文件；不是则返回空串。
@@ -1183,6 +1249,11 @@ func (c *TelegramChannel) downloadIncomingFile(ctx context.Context, event Messag
 	key := "telegram:" + c.cfg.APIBaseURL + ":" + c.cfg.BotToken + ":" + strings.TrimSpace(segment.Data["file_id"])
 	base := firstNonEmpty(strings.TrimRight(strings.TrimSpace(c.cfg.APIBaseURL), "/"), telegramDefaultAPIBase)
 	c.mu.RUnlock()
+	// 官方 Bot API 的 getFile 只给 20MB 以内的文件，超过必回 file is too big；
+	// 自建 Bot API Server 没有这个限制，照常下载。
+	if base == telegramDefaultAPIBase && telegramSegmentOverCloudLimit(segment) {
+		return "", fmt.Errorf("telegram: file is %s bytes, over the %d-byte Bot API download limit", segment.Data["file_size"], telegramCloudDownloadLimit)
+	}
 	legacyKey := key
 	if uniqueID := strings.TrimSpace(segment.Data["file_unique_id"]); uniqueID != "" {
 		key = "telegram-unique:" + base + ":" + uniqueID
@@ -1198,6 +1269,28 @@ func (c *TelegramChannel) downloadIncomingFile(ctx context.Context, event Messag
 		body, remotePath, err := c.downloadFileByID(ctx, strings.TrimSpace(segment.Data["file_id"]), telegramMaxUploadBytes)
 		return body, segment.Data["mime"], filepath.Base(firstNonEmpty(segment.Data["name"], remotePath, "media")), err
 	})
+}
+
+// telegramSegmentOverCloudLimit 判断这个媒体段是否超过官方 Bot API 的下载上限。
+func telegramSegmentOverCloudLimit(segment MessageSegment) bool {
+	size, err := strconv.ParseInt(strings.TrimSpace(segment.Data["file_size"]), 10, 64)
+	return err == nil && size > telegramCloudDownloadLimit
+}
+
+// telegramOversizedMediaReason 给取不到内容的 Telegram 媒体一句真实原因。超过
+// 20MB 的视频/文件机器人根本下载不到，笼统说「没有关键帧」会让模型猜成格式问题。
+func telegramOversizedMediaReason(event MessageEvent) string {
+	if event.Platform != PlatformTelegram {
+		return ""
+	}
+	for _, segment := range event.Segments {
+		if segment.Data["cached_file"] != "" || !telegramSegmentOverCloudLimit(segment) {
+			continue
+		}
+		size, _ := strconv.ParseInt(strings.TrimSpace(segment.Data["file_size"]), 10, 64)
+		return fmt.Sprintf("Telegram 机器人接口只能下载 20MB 以内的文件，这条媒体约 %.1fMB，取不到原文件，无法查看内容", float64(size)/(1<<20))
+	}
+	return ""
 }
 
 // downloadFileByID 把 file_id 换成文件内容。下载地址里带着 Bot Token
