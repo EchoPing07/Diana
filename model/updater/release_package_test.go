@@ -23,16 +23,7 @@ import (
 )
 
 func TestReleasePackageUpdaterStagesVerifiedArchive(t *testing.T) {
-	t.Run("current name", func(t *testing.T) { testReleasePackageUpdaterStagesVerifiedArchive(t, false) })
-	t.Run("legacy name", func(t *testing.T) { testReleasePackageUpdaterStagesVerifiedArchive(t, true) })
-}
-
-func testReleasePackageUpdaterStagesVerifiedArchive(t *testing.T, legacy bool) {
-	t.Helper()
 	assetName := ExpectedReleaseAssetName(runtime.GOOS, runtime.GOARCH)
-	if legacy {
-		assetName = LegacyReleaseAssetName(assetName)
-	}
 	if !strings.HasSuffix(assetName, ".tar.gz") {
 		t.Skip("tar package fixture is for Unix platforms")
 	}
@@ -54,16 +45,13 @@ func testReleasePackageUpdaterStagesVerifiedArchive(t *testing.T, legacy bool) {
 
 	installRoot := t.TempDir()
 	executable := filepath.Join(installRoot, binaryName)
-	frontend := filepath.Join(installRoot, "frontend-next", "dist")
 	database := filepath.Join(installRoot, "data", "diana.db")
 	writeUpdaterTestFile(t, executable, "old-binary", 0o700)
-	writeUpdaterTestFile(t, filepath.Join(frontend, "index.html"), "old-frontend", 0o600)
 	writeUpdaterTestFile(t, database, "database", 0o600)
 	var planPath string
 	options := ReleasePackageOptions{
 		CurrentVersion: "v0.4.0",
 		Executable:     executable,
-		FrontendDir:    frontend,
 		DatabasePath:   database,
 		HealthURL:      server.URL + "/api/health",
 		HTTPClient:     server.Client(),
@@ -179,15 +167,12 @@ func TestReleasePackageUpdaterRejectsChecksumMismatch(t *testing.T) {
 	defer server.Close()
 	installRoot := t.TempDir()
 	executable := filepath.Join(installRoot, binaryName)
-	frontend := filepath.Join(installRoot, "frontend-next", "dist")
 	database := filepath.Join(installRoot, "data", "diana.db")
 	writeUpdaterTestFile(t, executable, "old", 0o700)
-	writeUpdaterTestFile(t, filepath.Join(frontend, "index.html"), "old", 0o600)
 	writeUpdaterTestFile(t, database, "db", 0o600)
 	u, err := NewReleasePackageUpdater(ReleasePackageOptions{
 		CurrentVersion: "v0.4.0",
 		Executable:     executable,
-		FrontendDir:    frontend,
 		DatabasePath:   database,
 		HealthURL:      server.URL + "/api/health",
 		HTTPClient:     server.Client(),
@@ -302,7 +287,6 @@ func TestApplyReleasePlanBacksUpAndSwitchesHealthyPackage(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertUpdaterTestContent(t, plan.ExecutablePath, "new-binary")
-	assertUpdaterTestContent(t, filepath.Join(plan.FrontendPath, "index.html"), "new-frontend")
 	entries, err := os.ReadDir(backupsRoot)
 	if err != nil || len(entries) != 1 || entries[0].Name() != filepath.Base(plan.BackupRoot) {
 		t.Fatalf("after success: backups=%d err=%v", len(entries), err)
@@ -357,7 +341,6 @@ func TestApplyReleasePlanRestoresPackageAndDatabaseAfterFailedHealthCheck(t *tes
 		t.Fatalf("applyReleasePlan() error = %v", err)
 	}
 	assertUpdaterTestContent(t, plan.ExecutablePath, "old-binary")
-	assertUpdaterTestContent(t, filepath.Join(plan.FrontendPath, "index.html"), "old-frontend")
 	assertUpdaterTestContent(t, plan.DatabasePath, "old-database")
 	if !processes[0].stopped || !processes[1].released {
 		t.Fatalf("process states = %#v", processes)
@@ -450,7 +433,6 @@ func TestApplyReleasePlanRestartsOldVersionWhenUpdatedProcessCannotLaunch(t *tes
 		t.Fatalf("applyReleasePlan() error = %v, want rollback", err)
 	}
 	assertUpdaterTestContent(t, plan.ExecutablePath, "old-binary")
-	assertUpdaterTestContent(t, filepath.Join(plan.FrontendPath, "index.html"), "old-frontend")
 	assertUpdaterTestContent(t, plan.DatabasePath, "old-database")
 	if launches != 2 || !oldProcess.released {
 		t.Fatalf("launches = %d, old process = %#v", launches, oldProcess)
@@ -463,7 +445,7 @@ func TestApplyReleasePlanRestartsOldVersionWhenUpdatedProcessCannotLaunch(t *tes
 
 func TestApplyReleasePlanRestartsOldVersionWhenSwitchFails(t *testing.T) {
 	plan := releaseApplyFixture(t)
-	if err := os.RemoveAll(plan.StagedFrontend); err != nil {
+	if err := os.Remove(plan.StagedExecutable); err != nil {
 		t.Fatal(err)
 	}
 	oldProcess := &fakeReleaseProcess{}
@@ -476,7 +458,6 @@ func TestApplyReleasePlanRestartsOldVersionWhenSwitchFails(t *testing.T) {
 		t.Fatalf("applyReleasePlan() error = %v, want rollback", err)
 	}
 	assertUpdaterTestContent(t, plan.ExecutablePath, "old-binary")
-	assertUpdaterTestContent(t, filepath.Join(plan.FrontendPath, "index.html"), "old-frontend")
 	assertUpdaterTestContent(t, plan.DatabasePath, "old-database")
 	if !oldProcess.released {
 		t.Fatalf("old process = %#v", oldProcess)
@@ -505,15 +486,11 @@ func releaseApplyFixture(t *testing.T) releaseApplyPlan {
 	workRoot := filepath.Join(updatesRoot, "stage-test")
 	stagedRoot := filepath.Join(workRoot, "extracted", "package")
 	executable := filepath.Join(installRoot, "diana-webui-test")
-	frontend := filepath.Join(installRoot, "frontend-next", "dist")
 	database := filepath.Join(installRoot, "data", "diana.db")
 	stagedExecutable := filepath.Join(stagedRoot, "diana-webui-test")
-	stagedFrontend := filepath.Join(stagedRoot, "frontend-next", "dist")
 	writeUpdaterTestFile(t, executable, "old-binary", 0o700)
-	writeUpdaterTestFile(t, filepath.Join(frontend, "index.html"), "old-frontend", 0o600)
 	writeUpdaterTestFile(t, database, "old-database", 0o600)
 	writeUpdaterTestFile(t, stagedExecutable, "new-binary", 0o700)
-	writeUpdaterTestFile(t, filepath.Join(stagedFrontend, "index.html"), "new-frontend", 0o600)
 	return releaseApplyPlan{
 		Schema:           1,
 		ParentPID:        123,
@@ -524,8 +501,6 @@ func releaseApplyFixture(t *testing.T) releaseApplyPlan {
 		BackupRoot:       filepath.Join(updatesRoot, "backups", "test-v0.4.0"),
 		ExecutablePath:   executable,
 		StagedExecutable: stagedExecutable,
-		FrontendPath:     frontend,
-		StagedFrontend:   stagedFrontend,
 		DatabasePath:     database,
 		HealthURL:        "http://127.0.0.1:18080/api/health",
 		WorkingDir:       installRoot,
@@ -542,7 +517,6 @@ func releaseTarFixture(t *testing.T, assetName, binaryName string) []byte {
 		mode    int64
 	}{
 		{name: root + "/" + binaryName, content: "new-binary", mode: 0o755},
-		{name: root + "/frontend-next/dist/index.html", content: "new-frontend", mode: 0o644},
 		{name: root + "/run.sh", content: "#!/bin/sh\n", mode: 0o755},
 	}
 	var buffer bytes.Buffer
@@ -756,15 +730,12 @@ func TestReleasePackageUpdaterUnsupportedInContainer(t *testing.T) {
 	binaryName := expectedReleaseBinaryName(runtime.GOOS, runtime.GOARCH)
 	installRoot := t.TempDir()
 	executable := filepath.Join(installRoot, binaryName)
-	frontend := filepath.Join(installRoot, "frontend-next", "dist")
 	database := filepath.Join(installRoot, "data", "diana.db")
 	writeUpdaterTestFile(t, executable, "binary", 0o700)
-	writeUpdaterTestFile(t, filepath.Join(frontend, "index.html"), "frontend", 0o600)
 	writeUpdaterTestFile(t, database, "db", 0o600)
 	options := ReleasePackageOptions{
 		CurrentVersion: "v0.4.0",
 		Executable:     executable,
-		FrontendDir:    frontend,
 		DatabasePath:   database,
 		HealthURL:      "http://127.0.0.1:18080/api/health",
 	}

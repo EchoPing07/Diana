@@ -19,17 +19,9 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 RUN sh scripts/sync-models-dev.sh
+# 前端编进二进制，镜像里和发布包一样只有一个程序。
+COPY --from=frontend-next /src/frontend/dist/ ./cmd/webui/webdist/
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w -X main.buildVersion=${BUILD_VERSION}" -o /out/diana-webui ./cmd/webui
-
-# 随包发布的 gitea-mcp：只收 Gitea 官方的发布产物，版本和 SHA-256 钉在脚本里，
-# 对不上就在这里构建失败，不会把一个没核对过的二进制发出去。拉取的是目标平台的
-# 产物，构建机自己跑不跑得动它无所谓，所以停在 BUILDPLATFORM 上。
-FROM --platform=$BUILDPLATFORM alpine:3.22 AS gitea-mcp
-ARG TARGETOS
-ARG TARGETARCH
-RUN apk add --no-cache bash curl tar
-COPY scripts/fetch-gitea-mcp.sh /usr/local/bin/fetch-gitea-mcp.sh
-RUN /usr/local/bin/fetch-gitea-mcp.sh "${TARGETOS}" "${TARGETARCH}" /out
 
 # 随镜像发布的 yt-dlp：同样只收官方产物并校验 SHA-256。不用发行版的包是因为
 # 它必须新——Debian stable 把它冻在发布那天的版本，视频站解析会成片失效。
@@ -72,9 +64,6 @@ RUN apt-get update \
     && useradd -M -d /app/data/home -u 10001 diana \
     && mkdir -p /app/data/home \
     && chown -R diana:diana /app/data
-# gitea-mcp 放在主程序旁边，MCP 预设按这个位置拉起它；许可证随二进制一起带上。
-COPY --from=gitea-mcp /out/gitea-mcp /app/gitea-mcp
-COPY --from=gitea-mcp /out/gitea-mcp.LICENSE /app/gitea-mcp.LICENSE
 # 入口以 root 起步，把挂进来的 data 交给 diana 后再降权启动主程序。
 # 不能直接 USER diana：Linux 上 bind mount 自动建出来的宿主机目录归 root，
 # diana 写不进去，SQLite 和日志都起不来。
@@ -107,7 +96,6 @@ COPY --from=yt-dlp /out/yt-dlp /usr/local/bin/yt-dlp
 # glibc Linux 裸机部署则会自动改用 Chrome for Testing 无 root 下载。
 FROM runtime-base AS runtime-slim
 COPY --from=backend /out/diana-webui /app/diana-webui
-COPY --from=frontend-next /src/frontend/dist /app/frontend-next/dist
 # 浏览器控制扩展的源码。容器用户没有仓库检出，WebUI 的「下载扩展」就是从这里打包。
 COPY packaging/browser-control-extension /app/browser-control-extension
 EXPOSE 18080
@@ -115,7 +103,6 @@ ENTRYPOINT ["/usr/bin/tini", "-s", "--", "/usr/local/bin/diana-entrypoint", "/ap
 
 FROM runtime-full AS runtime
 COPY --from=backend /out/diana-webui /app/diana-webui
-COPY --from=frontend-next /src/frontend/dist /app/frontend-next/dist
 COPY packaging/browser-control-extension /app/browser-control-extension
 EXPOSE 18080
 ENTRYPOINT ["/usr/bin/tini", "-s", "--", "/usr/local/bin/diana-entrypoint", "/app/diana-webui"]

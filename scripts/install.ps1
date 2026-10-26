@@ -183,15 +183,6 @@ try {
         $parts = $_ -split '\s+', 2
         $parts.Count -eq 2 -and $parts[1].TrimStart('*') -eq $archiveName
     } | Select-Object -First 1
-    if (-not $checksumLine) {
-        $packageName = "diana-webui-windows-amd64"
-        $archiveName = "$packageName.zip"
-        $archivePath = Join-Path $tempDir $archiveName
-        $checksumLine = Get-Content $sumsPath | Where-Object {
-            $parts = $_ -split '\s+', 2
-            $parts.Count -eq 2 -and $parts[1].TrimStart('*') -eq $archiveName
-        } | Select-Object -First 1
-    }
     if (-not $checksumLine) { throw "SHA-256 entry for $archiveName was not found." }
     $expected = ($checksumLine -split '\s+')[0].ToLowerInvariant()
     if ($expected -notmatch '^[0-9a-f]{64}$') { throw "Invalid SHA-256 entry for $archiveName." }
@@ -203,7 +194,6 @@ try {
     Expand-Archive -Path $archivePath -DestinationPath $stageDir -Force
     $packageDir = Join-Path $stageDir $packageName
     if (-not (Test-Path (Join-Path $packageDir $binaryName))) { throw "Release package does not contain the Diana executable." }
-    if (-not (Test-Path (Join-Path $packageDir "frontend-next\dist\index.html"))) { throw "Release package does not contain the WebUI." }
 
     New-Item -ItemType Directory -Force -Path $installDir, (Join-Path $installDir "data"), (Join-Path $installDir "logs") | Out-Null
     $timestamp = (Get-Date).ToUniversalTime().ToString("yyyyMMddTHHmmssZ")
@@ -234,7 +224,7 @@ try {
     New-Item -ItemType Directory -Force -Path $runtimeBackup, $dataBackup | Out-Null
 
     $hadPrevious = $false
-    foreach ($item in @($binaryName, $compatBinaryName, "run.bat", "uninstall.ps1", "frontend-next", "gitea-mcp.exe", "gitea-mcp.LICENSE")) {
+    foreach ($item in @($binaryName, $compatBinaryName, "run.bat", "uninstall.ps1", "frontend-next")) {
         $current = Join-Path $installDir $item
         if (Test-Path $current) {
             $hadPrevious = $true
@@ -248,6 +238,8 @@ try {
     }
 
     Copy-Item -Recurse -Force -Path (Join-Path $packageDir "*") -Destination $installDir
+    # 包里的 frontend-next 只给旧版自更新器过校验，前端已编进程序，安装目录不留它。
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue (Join-Path $installDir "frontend-next")
     $configFile = Join-Path $installDir "config.yaml"
     $generatedPassword = $null
     $passwordCleared = $false
@@ -260,7 +252,6 @@ try {
             "server:",
             "  host: $(ConvertTo-DianaYamlScalar $bindHost)",
             "  port: $(ConvertTo-DianaYamlScalar ([string]$port))",
-            "  frontend_dist: $(ConvertTo-DianaYamlScalar (Join-Path $installDir 'frontend-next\dist'))",
             "storage:",
             "  db_path: $(ConvertTo-DianaYamlScalar $dbPath)",
             "  log_path: $(ConvertTo-DianaYamlScalar (Join-Path $installDir 'logs\diana.log'))",
@@ -346,7 +337,7 @@ try {
         if (-not $healthy) {
             Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
             if ($hadPrevious) {
-                foreach ($item in @($binaryName, $compatBinaryName, "run.bat", "uninstall.ps1", "frontend-next", "gitea-mcp.exe", "gitea-mcp.LICENSE")) {
+                foreach ($item in @($binaryName, $compatBinaryName, "run.bat", "uninstall.ps1", "frontend-next")) {
                     $current = Join-Path $installDir $item
                     $backup = Join-Path $runtimeBackup $item
                     if (Test-Path $current) { Remove-Item -Recurse -Force $current }

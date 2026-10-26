@@ -86,7 +86,6 @@ type pendingReleaseUpdate struct {
 type ReleasePackageOptions struct {
 	CurrentVersion string
 	Executable     string
-	FrontendDir    string
 	DatabasePath   string
 	HealthURL      string
 	WorkingDir     string
@@ -122,7 +121,6 @@ type MirrorResolver interface {
 type ReleasePackageUpdater struct {
 	currentVersion string
 	executable     string
-	frontendDir    string
 	databasePath   string
 	healthURL      string
 	workingDir     string
@@ -187,21 +185,6 @@ func ExpectedReleaseAssetName(goos, goarch string) string {
 	return base + ".tar.gz"
 }
 
-// LegacyReleaseAssetName is only used to read historical releases. New releases
-// publish one archive per platform, without a second legacy-named asset.
-func LegacyReleaseAssetName(name string) string {
-	for _, platform := range [][2]string{{"linux", "amd64"}, {"linux", "arm64"}, {"darwin", "amd64"}, {"darwin", "arm64"}, {"windows", "amd64"}} {
-		if name == ExpectedReleaseAssetName(platform[0], platform[1]) {
-			base := "diana-webui-" + platform[0] + "-" + platform[1]
-			if platform[0] == "windows" {
-				return base + ".zip"
-			}
-			return base + ".tar.gz"
-		}
-	}
-	return ""
-}
-
 func expectedReleaseBinaryName(goos, _ string) string {
 	name := "diana-webui"
 	if goos == "windows" {
@@ -250,14 +233,6 @@ func NewReleasePackageUpdater(options ReleasePackageOptions) (*ReleasePackageUpd
 	}
 	installRoot := filepath.Dir(absExecutable)
 	binaryName := expectedReleaseBinaryName(goos, goarch)
-	frontendDir := strings.TrimSpace(options.FrontendDir)
-	if frontendDir == "" {
-		frontendDir = filepath.Join(installRoot, "frontend-next", "dist")
-	}
-	absFrontend, err := filepath.Abs(frontendDir)
-	if err != nil {
-		return nil, err
-	}
 	databasePath := strings.TrimSpace(options.DatabasePath)
 	if databasePath != "" {
 		databasePath, err = filepath.Abs(databasePath)
@@ -291,7 +266,6 @@ func NewReleasePackageUpdater(options ReleasePackageOptions) (*ReleasePackageUpd
 	u := &ReleasePackageUpdater{
 		currentVersion: strings.TrimSpace(options.CurrentVersion),
 		executable:     absExecutable,
-		frontendDir:    absFrontend,
 		databasePath:   databasePath,
 		healthURL:      strings.TrimSpace(options.HealthURL),
 		workingDir:     workingDir,
@@ -314,10 +288,6 @@ func NewReleasePackageUpdater(options ReleasePackageOptions) (*ReleasePackageUpd
 		u.unsupportedWhy = "unsupported operating system " + goos
 	case filepath.Base(absExecutable) != u.binaryName:
 		u.unsupportedWhy = fmt.Sprintf("running executable %q is not the packaged binary %q", filepath.Base(absExecutable), u.binaryName)
-	case !pathWithin(installRoot, absFrontend):
-		u.unsupportedWhy = "frontend directory is outside the package root"
-	case !regularFileExists(filepath.Join(absFrontend, "index.html")):
-		u.unsupportedWhy = "packaged frontend is missing"
 	case databasePath == "" || !regularFileExists(databasePath):
 		u.unsupportedWhy = "SQLite database is missing"
 	case u.healthURL == "":
@@ -444,7 +414,7 @@ func (u *ReleasePackageUpdater) Download(ctx context.Context, release ReleasePac
 		return Result{}, fmt.Errorf("updater: invalid release tag %q", release.Tag)
 	}
 	assetName := release.Archive.Name
-	if (assetName != u.assetName && (assetName == "" || assetName != LegacyReleaseAssetName(u.assetName))) || strings.TrimSpace(release.Archive.URL) == "" {
+	if assetName != u.assetName || strings.TrimSpace(release.Archive.URL) == "" {
 		return Result{}, fmt.Errorf("%w: %s", ErrReleaseAssetMissing, u.assetName)
 	}
 	if release.Checksums.Name != "SHA256SUMS" || strings.TrimSpace(release.Checksums.URL) == "" {
@@ -528,9 +498,8 @@ func (u *ReleasePackageUpdater) Download(ctx context.Context, release ReleasePac
 	}
 	packageRoot := filepath.Join(extractRoot, releasePackageDirectory(assetName))
 	stagedExecutable := filepath.Join(packageRoot, u.binaryName)
-	stagedFrontend := filepath.Join(packageRoot, "frontend-next", "dist")
-	if !regularFileExists(stagedExecutable) || !regularFileExists(filepath.Join(stagedFrontend, "index.html")) {
-		return Result{}, fmt.Errorf("%w: expected binary or frontend is missing", ErrInvalidReleaseArchive)
+	if !regularFileExists(stagedExecutable) {
+		return Result{}, fmt.Errorf("%w: expected binary is missing", ErrInvalidReleaseArchive)
 	}
 
 	helperPath := filepath.Join(workRoot, "diana-release-helper")
@@ -558,8 +527,6 @@ func (u *ReleasePackageUpdater) Download(ctx context.Context, release ReleasePac
 		BackupRoot:       filepath.Join(updatesRoot, "backups", backupName),
 		ExecutablePath:   u.executable,
 		StagedExecutable: stagedExecutable,
-		FrontendPath:     u.frontendDir,
-		StagedFrontend:   stagedFrontend,
 		DatabasePath:     u.databasePath,
 		HealthURL:        u.healthURL,
 		WorkingDir:       u.workingDir,
@@ -569,14 +536,7 @@ func (u *ReleasePackageUpdater) Download(ctx context.Context, release ReleasePac
 		Supervisor: detectServiceSupervisor(),
 		LogPath:    filepath.Join(updatesRoot, "last-update.log"),
 	}
-	optionalNames := []string{"run.sh", "run.bat", "README.txt", "gitea-mcp.LICENSE"}
-	// 自带的 gitea-mcp 也要跟着换：不换的话升级完主程序还在用上一版的二进制，
-	// 而它和 Diana 是同一个包里一起测过的组合。
-	if runtime.GOOS == "windows" {
-		optionalNames = append(optionalNames, "gitea-mcp.exe")
-	} else {
-		optionalNames = append(optionalNames, "gitea-mcp")
-	}
+	optionalNames := []string{"run.sh", "run.bat", "README.txt"}
 	if runtime.GOOS == "darwin" {
 		optionalNames = append(optionalNames, "desktopctl-helper")
 	}
@@ -648,7 +608,7 @@ func (u *ReleasePackageUpdater) InstallDownloaded(ctx context.Context) (Result, 
 	if err := validateReleaseApplyPlan(plan); err != nil {
 		return Result{}, err
 	}
-	if !regularFileExists(plan.StagedExecutable) || !regularFileExists(filepath.Join(plan.StagedFrontend, "index.html")) {
+	if !regularFileExists(plan.StagedExecutable) {
 		return Result{}, fmt.Errorf("%w: downloaded package is incomplete", ErrInvalidReleaseArchive)
 	}
 	if err := writePrivateJSON(pending.PlanPath, plan); err != nil {
