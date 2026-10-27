@@ -27,7 +27,11 @@ type qqFakeAPI struct {
 	dedup int
 	// rejectMarkdown 让 msg_type 2 的消息被拒收，模拟没开 Markdown 权限。
 	rejectMarkdown bool
-	server         *httptest.Server
+	// rejectKeyboard 让带 keyboard 的消息被拒收，模拟没开通自定义按钮。
+	rejectKeyboard bool
+	// rejectGallery 让带 mqqapi 图集节点的消息被拒收，和生产实测的回包一致。
+	rejectGallery bool
+	server        *httptest.Server
 }
 
 func newQQFakeAPI(t *testing.T) *qqFakeAPI {
@@ -64,7 +68,14 @@ func newQQFakeAPI(t *testing.T) *qqFakeAPI {
 		case strings.HasSuffix(r.URL.Path, "/messages"):
 			api.mu.Lock()
 			api.messagePosts = append(api.messagePosts, body)
-			if api.rejectMarkdown && body["msg_type"] == float64(2) {
+			_, hasKeyboard := body["keyboard"]
+			if markdown, _ := body["markdown"].(map[string]any); api.rejectGallery && strings.Contains(markdownContentOf(markdown), "mqqapi://markdown/node") {
+				api.mu.Unlock()
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{"message": "请求参数不允许包含url mqqapi://markdown/node", "code": 40034028})
+				return
+			}
+			if (api.rejectMarkdown && body["msg_type"] == float64(2)) || (api.rejectKeyboard && hasKeyboard) {
 				api.mu.Unlock()
 				w.WriteHeader(http.StatusBadRequest)
 				_ = json.NewEncoder(w).Encode(map[string]any{"message": "不允许发送原生 markdown", "code": 304003})
@@ -364,7 +375,8 @@ func TestQQOfficialGuildMessageOmitsOutboundQuote(t *testing.T) {
 	}
 }
 
-// 带 Markdown 结构的回复走 msg_type 2，平台不认的行内代码就地去掉标记。
+// 带 Markdown 结构的回复走 msg_type 2，平台不认的行内代码就地去掉标记，列表前补
+// 空行（紧贴正文的列表 QQ 不识别）。
 func TestQQOfficialSendsMarkdownAsNativeMarkdown(t *testing.T) {
 	api := newQQFakeAPI(t)
 	channel := api.channel()
@@ -376,7 +388,7 @@ func TestQQOfficialSendsMarkdownAsNativeMarkdown(t *testing.T) {
 	}
 	msg := api.messages[0]
 	markdown, _ := msg["markdown"].(map[string]any)
-	if msg["msg_type"].(float64) != 2 || markdown["content"] != "**结论**\n- 用 go test\n- 再看日志" || msg["content"] != nil || msg["msg_id"] != "in1" {
+	if msg["msg_type"].(float64) != 2 || markdown["content"] != "**结论**\n\n- 用 go test\n- 再看日志" || msg["content"] != nil || msg["msg_id"] != "in1" {
 		t.Fatalf("markdown message = %#v", msg)
 	}
 }
@@ -440,4 +452,9 @@ func TestQQOfficialSendsFileSegment(t *testing.T) {
 	if strings.Join(api.paths, "|") != strings.Join(want, "|") {
 		t.Fatalf("request order = %v", api.paths)
 	}
+}
+
+func markdownContentOf(markdown map[string]any) string {
+	content, _ := markdown["content"].(string)
+	return content
 }
