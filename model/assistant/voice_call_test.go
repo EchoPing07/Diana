@@ -24,10 +24,11 @@ func newVoiceCallTestRuntime(t *testing.T, reply string) (*Runtime, *recordingCh
 
 func TestVoiceCallReplyGoesToCallNotPlatform(t *testing.T) {
 	runtime, channel, provider := newVoiceCallTestRuntime(t, "听得到哦。今天想聊点什么？")
-	_, base, err := runtime.voiceCallEvent("bot")
+	_, base, err := runtime.ownerChatEvent("bot")
 	if err != nil {
-		t.Fatalf("voiceCallEvent() error = %v", err)
+		t.Fatalf("ownerChatEvent() error = %v", err)
 	}
+	base.voiceCall = true
 	call := &VoiceCall{runtime: runtime, callID: "t1", base: base}
 	var mu sync.Mutex
 	var emitted []string
@@ -75,12 +76,8 @@ func TestVoiceCallReplyGoesToCallNotPlatform(t *testing.T) {
 	}
 }
 
-func TestVoiceCallInfoRequiresOwnerAndSlots(t *testing.T) {
-	runtime := NewRuntime(BotConfig{ID: "bot"}, nilChannel{}, NewPluginManager(), nil, nil, nil, nil)
-	if info := runtime.VoiceCallInfo(context.Background(), "bot"); !strings.Contains(info.Problem, "主人") {
-		t.Fatalf("没有主人账号时应拒绝，info = %#v", info)
-	}
-	runtime, _, _ = newVoiceCallTestRuntime(t, "")
+func TestVoiceCallInfoRequiresSlots(t *testing.T) {
+	runtime, _, _ := newVoiceCallTestRuntime(t, "")
 	info := runtime.VoiceCallInfo(context.Background(), "bot")
 	if info.STT || info.TTS || !strings.Contains(info.Problem, "语音识别和语音合成") {
 		t.Fatalf("没配语音插槽时应拒绝，info = %#v", info)

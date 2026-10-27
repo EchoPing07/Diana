@@ -147,24 +147,12 @@
           class="btn ghost small icon-only topbar-chat"
           :class="{ active: currentView === 'admin-chat' }"
           type="button"
-          title="管理对话：安装扩展与排查问题"
+          :title="currentView === 'admin-chat' ? '关闭管理对话' : '管理对话：安装扩展与排查问题'"
           aria-label="管理对话"
           :aria-pressed="currentView === 'admin-chat'"
-          @click="go('admin-chat')"
+          @click="toggleAdminChat"
         >
           <MessageCircle :size="16" aria-hidden="true" />
-        </button>
-        <!-- 语音通话和管理对话一样是随时要用的入口，挨着放。 -->
-        <button
-          class="btn ghost small icon-only topbar-chat"
-          :class="{ active: currentView === 'call' }"
-          type="button"
-          title="和机器人语音通话"
-          aria-label="语音通话"
-          :aria-pressed="currentView === 'call'"
-          @click="go('call')"
-        >
-          <Phone :size="16" aria-hidden="true" />
         </button>
         <a
           class="btn ghost small icon-only topbar-repo"
@@ -232,7 +220,7 @@ import {
   FolderOpen,
   LayoutGrid,
   MessageCircle,
-  Phone,
+  MessagesSquare,
   LogOut,
   PanelLeftClose,
   PanelLeftOpen,
@@ -279,7 +267,7 @@ function lazyView(loader: () => Promise<{ default: Component }>): Component {
 // 保持稳定，配合 KeepAlive 后只挂载一次，切页回来直接复用已有 DOM 和数据。
 const RecordsView = lazyView(() => import("./views/RecordsView.vue"));
 const AdminChatView = lazyView(() => import("./views/AdminChatView.vue"));
-const CallView = lazyView(() => import("./views/CallView.vue"));
+const ChatView = lazyView(() => import("./views/ChatView.vue"));
 const TasksView = lazyView(() => import("./views/TasksView.vue"));
 const SetupWizard = lazyView(() => import("./views/SetupWizard.vue"));
 const LLMView = lazyView(() => import("./views/LLMView.vue"));
@@ -297,7 +285,7 @@ const VIEW_CACHE_LIMIT = 16;
 const viewComponents: Record<ViewID, Component> = {
   dashboard: DashboardView,
   "admin-chat": AdminChatView,
-  call: CallView,
+  chat: ChatView,
   events: RecordsView,
   tasks: TasksView,
   setup: SetupWizard,
@@ -409,7 +397,7 @@ const SETUP_DISMISS_KEY = "dqb-next:setup-seen";
 const viewTitles: Record<ViewID, string> = {
   dashboard: "总览",
   "admin-chat": "管理对话",
-  call: "语音通话",
+  chat: "聊天",
   browser: "浏览器",
   workspace: "文件",
   events: "运行记录",
@@ -433,7 +421,7 @@ const viewTitles: Record<ViewID, string> = {
 const botProfiles = ref<BotProfileConfig[]>([]);
 // 这几页的内容不分机器人（管理员对话、全局一本的世界书），顶上的作用域条会让人
 // 以为改的是当前那台的，所以不显示。
-const unscopedViews = new Set<ViewID>(["admin-chat", "world-book"]);
+const unscopedViews = new Set<ViewID>(["admin-chat", "chat", "world-book"]);
 const scopeProfile = computed(() => botProfiles.value.find((profile) => profile.id === botScope.value));
 const scopePlatform = computed(() => {
   const platform = scopeProfile.value?.platform;
@@ -539,7 +527,7 @@ function navIcon(id: ViewID): Component {
   const icons: Partial<Record<ViewID, Component>> = {
     dashboard: LayoutGrid,
     "admin-chat": MessageCircle,
-    call: Phone,
+    chat: MessagesSquare,
     events: Activity,
     tasks: CalendarClock,
     provider: BrainCircuit,
@@ -561,6 +549,15 @@ function navIcon(id: ViewID): Component {
 function go(view: ViewID): void {
   navigate(view);
   drawerOpen.value = false;
+}
+
+// 顶栏的管理对话按钮是开关：再点一下回到打开它之前的那页，直接打开的就回总览。
+let viewBeforeAdminChat: ViewID = "dashboard";
+watch(currentView, (view, previous) => {
+  if (view === "admin-chat" && previous && previous !== "admin-chat") viewBeforeAdminChat = previous;
+});
+function toggleAdminChat(): void {
+  go(currentView.value === "admin-chat" ? viewBeforeAdminChat : "admin-chat");
 }
 
 function requestBotCreate(): void {
