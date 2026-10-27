@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { cacheUsageDisplay, cacheUtilization, groupLLMUsage, usageModelKey, usagePurposeLabel, usageShare } from "./llm-usage.ts";
+import { cacheUsageDisplay, cacheUtilization, groupCacheByPurpose, groupLLMUsage, splitCacheUsage, usageModelKey, usagePurposeLabel, usageShare } from "./llm-usage.ts";
 
 const entry = (purpose, provider, model, input, output, calls = 1, missing = 0) => ({
   purpose, provider, model, input_tokens: input, output_tokens: output,
@@ -77,4 +77,30 @@ test("缓存利用率用输入 Token 做分母，并可分别查看筛选结果"
     models.reduce((sum, model) => sum + model.cached_input_tokens, 0),
     models.reduce((sum, model) => sum + model.input_tokens, 0)
   ), "550 Token（55.0%）");
+});
+
+test("总览的缓存命中率剔除发送前审核和回复触发判断，剔除部分单独累计", () => {
+  const split = splitCacheUsage([
+    entry("reply", "a", "m", 100, 1),
+    entry("reply_send_audit", "a", "m", 40, 1),
+    entry("proactive_reply_router", "a", "m", 20, 1),
+    entry(" reply_fatigue_gate ", "a", "m", 10, 1),
+    entry("memory_extract", "a", "m", 30, 1)
+  ]);
+  assert.deepEqual(split, { cached_input_tokens: 65, input_tokens: 130, excluded_cached_input_tokens: 35, excluded_input_tokens: 70 });
+});
+
+test("记录页按主回复、回复判断、发送前审核、其他四类汇总命中率", () => {
+  const groups = groupCacheByPurpose([
+    { purpose: "reply_send_audit", calls: 1, input_tokens: 3000, cached_input_tokens: 0 },
+    { purpose: "reply", calls: 3, input_tokens: 60000, cached_input_tokens: 57000 },
+    { purpose: "reply_account_safety", calls: 1, input_tokens: 1000, cached_input_tokens: 500 },
+    { purpose: "proactive_reply_router", calls: 2, input_tokens: 4000, cached_input_tokens: 1000 },
+    { purpose: "memory_extract", calls: 1, input_tokens: 0, cached_input_tokens: 0 }
+  ]);
+  assert.deepEqual(groups.map((group) => [group.label, group.calls, group.input_tokens, group.cached_input_tokens]), [
+    ["主回复", 3, 60000, 57000],
+    ["回复判断", 2, 4000, 1000],
+    ["发送前审核", 2, 4000, 500]
+  ]);
 });

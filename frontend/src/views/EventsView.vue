@@ -381,6 +381,7 @@
                 <span v-if="event.total_tokens">
                   Token {{ formatNumber(event.total_tokens) }}（输入 {{ formatNumber(event.input_tokens || 0) }} / 输出 {{ formatNumber(event.output_tokens || 0) }}<template v-if="eventCacheHitText(event)"> / {{ eventCacheHitText(event) }}</template>）
                 </span>
+                <span v-if="eventPurposeCacheText(event)">缓存命中率 {{ eventPurposeCacheText(event) }}</span>
                 <span v-if="event.usage_missing_calls" class="usage-missing" :title="'上游没返回用量的调用不计 token，这条的实际消耗比显示的多'">{{ event.usage_missing_calls }} 次调用未报用量</span>
                 <span v-if="event.output_tokens_per_second">
                   {{ event.output_tokens_per_second.toFixed(1) }} tok/s（模型耗时 {{ formatDurationMS(event.llm_duration_ms || 0) }}<template v-if="event.ttft_calls"> / 首 token {{ formatDurationMS(event.avg_ttft_ms || 0) }}</template>）
@@ -696,6 +697,7 @@ import {
   type AssistantContextBudgetLayer
 } from "../api";
 import { formatClock, formatNumber, formatTime } from "../lib/format";
+import { cacheUtilization, groupCacheByPurpose } from "../lib/llm-usage";
 import { askConfirm } from "../lib/confirm";
 import { displayMessageText, displayChatIdentity } from "../lib/message-display";
 import { currentView, navigate } from "../router";
@@ -811,6 +813,8 @@ const summary = computed(() => ({
   output_tokens: summaryResponse.value?.output_tokens ?? 0,
   total_tokens: summaryResponse.value?.total_tokens ?? 0,
   cached_input_tokens: summaryResponse.value?.cached_input_tokens ?? 0,
+  cache_rate_input_tokens: summaryResponse.value?.cache_rate_input_tokens ?? summaryResponse.value?.input_tokens ?? 0,
+  cache_rate_cached_input_tokens: summaryResponse.value?.cache_rate_cached_input_tokens ?? summaryResponse.value?.cached_input_tokens ?? 0,
   llm_duration_ms: summaryResponse.value?.llm_duration_ms ?? 0,
   output_tokens_per_second: summaryResponse.value?.output_tokens_per_second ?? 0,
   avg_ttft_ms: summaryResponse.value?.avg_ttft_ms ?? 0,
@@ -837,12 +841,14 @@ const eventBreakdown = computed(() => {
   return parts.join(" · ");
 });
 const tokenBreakdown = computed(() => {
-  const cached = cacheHitRate(summary.value.cached_input_tokens, summary.value.input_tokens);
+  // 命中率剔除发送前审核和回复触发判断：它们请求短、几乎不复用前缀，混进来会把
+  // 主回复这些长请求的命中率拉低。各用途的命中率在仪表盘的「按使用方式」明细里。
+  const cached = cacheHitRate(summary.value.cache_rate_cached_input_tokens, summary.value.cache_rate_input_tokens);
   // 缓存命中率原本独占一张卡，但它的分母就是这里的「输入」，拆成两张只是把同一个
   // 数字写两遍。挂在输入后面，命中多少一眼就能对上。
   const input = cached === null
     ? `输入 ${formatNumber(summary.value.input_tokens)}`
-    : `输入 ${formatNumber(summary.value.input_tokens)}（缓存命中 ${Math.round(cached * 100)}%）`;
+    : `输入 ${formatNumber(summary.value.input_tokens)}（缓存命中 ${Math.round(cached * 100)}%${cacheRateNote(summary.value.cache_rate_input_tokens, summary.value.input_tokens)}）`;
   const missing = summary.value.usage_missing_calls > 0 ? `，其中 ${formatNumber(summary.value.usage_missing_calls)} 次上游未报用量` : "";
   return `${input} / 输出 ${formatNumber(summary.value.output_tokens)} · ${formatNumber(summary.value.llm_calls)} 次调用${missing}`;
 });
@@ -888,10 +894,27 @@ function cacheHitRate(cached: number, input: number): number | null {
   return Math.min(1, cached / input);
 }
 
+// 有审核或触发判断的调用被剔除时才注明口径，不然每行都多一截字。
+function cacheRateNote(rateInput: number, input: number): string {
+  return rateInput < input ? "，不含审核和触发判断" : "";
+}
+
+// 按主回复、回复判断、发送前审核分开看命中率：主回复续接后能到九成以上，审核和
+// 判断几乎不命中，合在一起只剩一个说明不了问题的平均数。
+function eventPurposeCacheText(event: AssistantEventDetail): string {
+  const groups = groupCacheByPurpose(event.purposes ?? []);
+  if (groups.length === 0) return "";
+  return groups
+    .map((item) => `${item.label} ${cacheUtilization(item.cached_input_tokens, item.input_tokens)}${item.calls > 1 ? `（${item.calls} 次）` : ""}`)
+    .join(" · ");
+}
+
 function eventCacheHitText(event: AssistantEventDetail): string {
-  const rate = cacheHitRate(event.cached_input_tokens || 0, event.input_tokens || 0);
-  if (rate === null || !event.cached_input_tokens) return "";
-  return `缓存命中 ${formatNumber(event.cached_input_tokens)}（${Math.round(rate * 100)}%）`;
+  if (!event.cached_input_tokens) return "";
+  const rateInput = event.cache_rate_input_tokens ?? event.input_tokens ?? 0;
+  const rate = cacheHitRate(event.cache_rate_cached_input_tokens ?? event.cached_input_tokens, rateInput);
+  if (rate === null) return `缓存命中 ${formatNumber(event.cached_input_tokens)}`;
+  return `缓存命中 ${formatNumber(event.cached_input_tokens)}（${Math.round(rate * 100)}%${cacheRateNote(rateInput, event.input_tokens || 0)}）`;
 }
 
 function platformLabel(platform: string): string {

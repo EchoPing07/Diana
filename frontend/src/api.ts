@@ -2951,6 +2951,13 @@ export interface AssistantEventTemporaryMemory {
   source_message_id?: string;
 }
 
+export interface AssistantEventPurposeUsage {
+  purpose: string;
+  calls: number;
+  input_tokens: number;
+  cached_input_tokens: number;
+}
+
 export interface AssistantEventDetail extends BotEvent {
   id: string;
   sender_name?: string;
@@ -2976,6 +2983,9 @@ export interface AssistantEventDetail extends BotEvent {
   output_tokens?: number;
   total_tokens?: number;
   cached_input_tokens?: number;
+  /** 算缓存命中率用的输入和命中：剔除发送前审核和回复触发判断。旧版后端没有这两项。 */
+  cache_rate_input_tokens?: number;
+  cache_rate_cached_input_tokens?: number;
   /** 这条消息所有模型调用的墙钟耗时之和；和 duration_ms（整条消息的处理耗时）不同。 */
   llm_duration_ms?: number;
   /** 输出 token 速率，由 output_tokens 和 llm_duration_ms 算出。 */
@@ -2989,6 +2999,8 @@ export interface AssistantEventDetail extends BotEvent {
   reply_models?: string[];
   /** 这条消息所有模型调用按模型汇总的次数，路由、审核、记忆抽取都算。 */
   models?: AssistantEventModelUsage[];
+  /** 这条消息的模型调用按用途汇总的次数、输入和缓存命中。旧版后端没有。 */
+  purposes?: AssistantEventPurposeUsage[];
   decision: "replied" | "not_replied" | "pending" | "error" | string;
   reason: string;
   delivery_stage?: "generated" | "send_attempted" | "acknowledged" | "echo_persisted" | "failed" | string;
@@ -3089,6 +3101,9 @@ export interface AssistantEventsResponse {
   output_tokens: number;
   total_tokens: number;
   cached_input_tokens: number;
+  /** 算缓存命中率用的输入和命中：剔除发送前审核和回复触发判断。旧版后端没有这两项。 */
+  cache_rate_input_tokens?: number;
+  cache_rate_cached_input_tokens?: number;
   llm_duration_ms: number;
   output_tokens_per_second: number;
   avg_ttft_ms: number;
