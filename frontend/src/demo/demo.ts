@@ -1173,7 +1173,7 @@ function demoWebChat(profile: string): { id: string; role: string; text: string;
       { id: "demo-2", role: "assistant", text: "辛苦啦，先喝口水歇一会儿", at: base + 20 },
       { id: "demo-3", role: "assistant", text: "晚上想吃点什么？我帮你想想", at: base + 25 },
       { id: "demo-4", role: "user", text: "番茄牛腩吧", at: base + 25 * 3600 },
-      { id: "demo-5", role: "assistant", text: "好耶，炖一锅能吃两顿", at: base + 25 * 3600 + 30 }
+      { id: "demo-5", role: "assistant", text: "好耶，**番茄牛腩**炖一锅能吃两顿", at: base + 25 * 3600 + 30 }
     ];
     demoWebChats.set(profile, history);
   }
@@ -1393,7 +1393,7 @@ async function demoFetch(input: RequestInfo | URL, init?: RequestInit): Promise<
   if (path === "/api/assistant/chat") {
     const profile = (method === "GET" ? url.searchParams.get("profile") : String(body.profile || "")) || "demo";
     const history = demoWebChat(profile);
-    if (method === "GET") return json({ info: { bot_id: profile, bot_name: "Diana", platform: "onebot-v11" }, messages: history });
+    if (method === "GET") return json({ info: { bot_id: profile, bot_name: "Diana", platform: "onebot-v11", owner_avatar_url: demoGroupAvatar }, messages: history });
     const now = Math.floor(Date.now() / 1000);
     history.push({ id: `demo-in-${now}`, role: "user", text: String(body.text || ""), at: now });
     const reply = { id: `demo-out-${now}`, role: "assistant", text: "演示模式里我只会回这一句～真实部署里这就是和我私聊，QQ 上聊过的也在这里。", at: now + 1 };
