@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/SuInk/diana/internal/procgroup"
+	"github.com/SuInk/diana/internal/termux"
 )
 
 const (
@@ -276,6 +277,9 @@ func probeResolverDependencies() []ResolverDependency {
 	return out
 }
 
+// detectTermux 单独留成变量，测试里换掉它就能在任何机器上走 Termux 那条安装计划。
+var detectTermux = termux.Detected
+
 func resolverDependencyInstallPlan(name, goos string, lookPath func(string) (string, error)) (resolverInstallPlan, error) {
 	if !installableDependency(name) {
 		return resolverInstallPlan{}, fmt.Errorf("%w：%s", ErrUnknownResolverDependency, name)
@@ -339,12 +343,31 @@ func resolverDependencyInstallPlan(name, goos string, lookPath func(string) (str
 		}},
 	}
 
+	// Termux 也带 apt-get，但走它会去装主仓库里没有的 chromium 和 fonts-noto-cjk。
+	termuxPkg := managerSpec{command: "pkg", label: "Termux pkg", build: func(path, dependency string) []resolverInstallCommand {
+		if dependency == browserDependencyName {
+			// Chromium 不在 Termux 主仓库，在 tur-repo 里；它依赖的 gtk3 等又在 x11-repo 里，
+			// 只装 tur-repo 会报 gtk3 not installable。两个源都先装上。tur-repo 的 Chromium
+			// 跟着最新 libc++ 编译，没升级过的 Termux 装完一启动就报 cannot locate symbol，
+			// 所以先整体升级；后台没有终端可答配置文件冲突，一律保留用户改过的版本。
+			return []resolverInstallCommand{
+				{path: path, args: []string{"upgrade", "-y", "-o", "Dpkg::Options::=--force-confold"}},
+				{path: path, args: []string{"install", "-y", "x11-repo", "tur-repo"}},
+				{path: path, args: []string{"install", "-y", "chromium"}},
+			}
+		}
+		return []resolverInstallCommand{{path: path, args: []string{"install", "-y", resolverPackageName(dependency, "pkg")}}}
+	}}
+
 	var managers []managerSpec
 	switch goos {
 	case "darwin":
 		managers = []managerSpec{brew}
-	case "linux":
+	case "linux", "android":
 		managers = linuxManagers
+		if detectTermux() {
+			managers = []managerSpec{termuxPkg}
+		}
 	case "windows":
 		managers = windowsManagers
 	}

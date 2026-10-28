@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/SuInk/diana/internal/termux"
 	"github.com/SuInk/diana/internal/xvfb"
 	"net/url"
 	"os"
@@ -466,7 +467,8 @@ func findHeadlessBrowserExecutable(configured string) (string, error) {
 		return "", fmt.Errorf("configured headless browser executable not found: %s", configured)
 	}
 
-	var paths []string
+	// Termux 的程序都在 $PREFIX/bin，服务管理器起的进程 PATH 里未必有它。
+	paths := termux.ChromiumPaths()
 	switch runtime.GOOS {
 	case "darwin":
 		paths = append(paths,
@@ -529,8 +531,25 @@ type browserSandboxDirs struct {
 	crash   string
 }
 
+// chromeSingletonSocketSuffix 是 Chrome 在 TMPDIR 下建单实例套接字的路径尾巴。
+// Unix 套接字路径上限 108 字节（macOS 104），超了 Chrome 报「Socket path too long」直接 abort。
+const chromeSingletonSocketSuffix = "/org.chromium.Chromium.XXXXXX/SingletonSocket"
+
+// shortBrowserTempPrefix 是临时目录太深时换用的前缀。
+const shortBrowserTempPrefix = "dhb-"
+
+// browserSandboxPrefix 在系统临时目录太深时把前缀换短：根目录同时是 Chrome 的 TMPDIR，
+// 安卓 Termux 的临时目录是 /data/data/com.termux/files/usr/tmp，拼上长前缀就超出套接字
+// 路径上限，浏览器起不来。MkdirTemp 在前缀后面补 10 位随机数。
+func browserSandboxPrefix(tempDir, prefix string) string {
+	if len(filepath.Join(tempDir, prefix))+10+len(chromeSingletonSocketSuffix) > 103 {
+		return shortBrowserTempPrefix
+	}
+	return prefix
+}
+
 func newBrowserSandboxDirs(prefix string) (browserSandboxDirs, error) {
-	root, err := os.MkdirTemp("", prefix)
+	root, err := os.MkdirTemp("", browserSandboxPrefix(os.TempDir(), prefix))
 	if err != nil {
 		return browserSandboxDirs{}, err
 	}
@@ -630,6 +649,11 @@ func sandboxedChromeBaseArgsForMode(profileDir, cacheDir, crashDir string, headl
 	}
 	if headless {
 		args = append([]string{"--headless=new"}, args...)
+	}
+	// 安卓不给普通 App 开用户命名空间，Chromium 的进程沙盒在 Termux 里起不来，
+	// 不关掉连启动都失败。页面隔离靠 Termux 自己的 App 沙盒和上面的内网屏蔽。
+	if termux.Detected() {
+		args = append(args, "--no-sandbox")
 	}
 	return args
 }
