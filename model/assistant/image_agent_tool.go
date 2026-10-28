@@ -206,7 +206,7 @@ func (t *dianaImageTool) InputSchema() map[string]any {
 	properties := map[string]any{
 		"operation": toolEnumParam("generate 凭文字出新图；edit 以图或头像为底修改。省略时有原图来源按 edit", operations...),
 		"prompt":    toolStringParam("给图片模型的完整自包含提示词，不用对话口吻和上下文指代"),
-		"caption":   toolStringParam("随图发送的一句短文字"),
+		"caption":   toolStringParam("随图的一句话，用平时聊天口吻，别写「图片生成完成」这类系统提示；可留空只发图"),
 	}
 	// 要编辑谁的头像由你来判断：运行时不去读用户的措辞，只负责把你点名的 id 换成
 	// 头像地址，并核对这个人在当前会话里确实存在。
@@ -323,13 +323,7 @@ func (t *dianaImageTool) prepareRequest(input map[string]any) (dianaImageToolReq
 	if len([]rune(caption)) > 200 {
 		caption = string([]rune(caption)[:200])
 	}
-	if caption == "" {
-		if operation == "edit" {
-			caption = "图片编辑完成。"
-		} else {
-			caption = "图片生成完成。"
-		}
-	}
+	// 不再补「图片生成完成。」这类系统腔兜底：没写配文就只发图，像真人甩图一样。
 	if len(sourceMessageIDs) > maxImageEditSourceMessages {
 		return dianaImageToolRequest{}, fmt.Errorf("source_message_ids 最多 %d 条", maxImageEditSourceMessages)
 	}
@@ -432,10 +426,8 @@ func (t *dianaImageTool) enqueue(ctx context.Context, request dianaImageToolRequ
 				}
 				return result, nil
 			}
+			// 成图不引用原消息：像真人画完直接甩图，引用框反倒显得像工单回执。
 			message := OutgoingMessage{Text: output.Caption, ImageURLs: output.ImageURLs, GeneratedImageModels: output.Models}
-			if t.event.Kind == EventKindGroup {
-				message.ReplyMessageID = t.event.MessageID
-			}
 			return PluginTaskResult{Messages: []OutgoingMessage{message}}, nil
 		},
 	}
@@ -623,10 +615,6 @@ func (t *dianaImageTool) execute(ctx context.Context, request dianaImageToolRequ
 						outgoing.Text = label
 					} else if streamed == 0 {
 						outgoing.Text = request.Caption
-					}
-					if streamed == 0 && t.event.Kind == EventKindGroup {
-						// 第一张引用原消息,后面的直接发图。
-						outgoing.ReplyMessageID = t.event.MessageID
 					}
 					if sendErr := services.Send(ctx, outgoing); sendErr == nil {
 						streamed++
