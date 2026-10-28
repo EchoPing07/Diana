@@ -843,8 +843,10 @@ func main() {
 	// OneBot 路由必须在 SPA fallback 之前注册，否则接入端会拿到前端 HTML 而不是 WebSocket。
 	router.GET("/onebot/v11/ws", gin.WrapH(oneBotServer))
 	router.POST("/onebot/v11/http", gin.WrapH(oneBotHTTPServer))
-	frontendRoot, frontendSource := frontendFileSystem(appCfg.Server.FrontendDist)
-	log.Printf("webui frontend: %s", frontendSource)
+	frontendRoot, frontendEmbedded := frontendFileSystem()
+	if !frontendEmbedded {
+		log.Printf("webui frontend warning: this build has no embedded frontend; build it with `make build` (copies frontend/dist into cmd/webui/webdist)")
+	}
 	router.NoRoute(spaHandler(frontendRoot))
 
 	log.Printf("webui listening on http://%s (监听地址；Docker 请使用宿主机地址和映射端口访问)", listener.Addr())
@@ -987,37 +989,6 @@ func setupLogging(logPath string) (io.Writer, func(), func()) {
 		dlog.Init(nil)
 		_ = file.Close()
 	}, startupDone
-}
-
-// frontendDistDir 查找生产前端静态文件目录。
-func frontendDistDir(custom string) string {
-	// 同时兼容源码目录运行、打包后从二进制旁边运行、以及测试工作目录切换。
-	// 源码目录是 frontend/；发布包和已安装实例仍使用 frontend-next/dist，两种布局都要认。
-	candidates := []string{
-		"frontend/dist",
-		"../../frontend/dist",
-		"frontend-next/dist",
-		"../../frontend-next/dist",
-	}
-	if executable, err := os.Executable(); err == nil {
-		executableDir := filepath.Dir(executable)
-		candidates = append([]string{
-			filepath.Clean(filepath.Join(executableDir, "..", "Resources", "frontend-next", "dist")),
-		}, candidates...)
-	}
-	if configDir, err := os.UserConfigDir(); err == nil {
-		candidates = append(candidates, filepath.Join(configDir, "diana", "frontend-next", "dist"))
-	}
-	if custom = strings.TrimSpace(custom); custom != "" {
-		// 显式指定的目录永远最优先，即使暂时不存在也按它返回，方便部署脚本预创建。
-		candidates = append([]string{custom}, candidates...)
-	}
-	for _, candidate := range candidates {
-		if stat, err := os.Stat(candidate); err == nil && stat.IsDir() {
-			return candidate
-		}
-	}
-	return candidates[0]
 }
 
 // spaHandler 返回前端单页应用的兜底路由处理器。

@@ -89,17 +89,8 @@ func runDoctorCommand(args []string, output io.Writer) error {
 		directory := filepath.Dir(resolveConfigRelative(path, config.Storage.LogPath))
 		check(directoryWritable(directory), "log directory writable: "+directory, "log directory is not writable: "+directory)
 	}
-	frontendSetting := strings.TrimSpace(config.Server.FrontendDist)
-	if frontendSetting != "" {
-		frontendSetting = resolveConfigRelative(path, frontendSetting)
-	}
-	if _, embedded := embeddedFrontend(); embedded {
-		check(true, "frontend assets: embedded", "")
-	} else {
-		frontend := frontendDistDir(frontendSetting)
-		_, frontendErr := os.Stat(filepath.Join(frontend, "index.html"))
-		check(frontendErr == nil, "frontend assets: "+frontend, "frontend assets are missing: "+frontend)
-	}
+	_, embedded := embeddedFrontend()
+	check(embedded, "frontend assets: embedded", "frontend assets are not embedded in this build; rebuild with `make build`")
 	address := healthAddress(config)
 	health, healthErr := fetchHealth(context.Background(), address)
 	if healthErr == nil {

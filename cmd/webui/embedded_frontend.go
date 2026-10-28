@@ -12,7 +12,8 @@ import (
 //go:embed all:webdist
 var embeddedFrontendFiles embed.FS
 
-// embeddedFrontend 返回编进二进制的前端；源码构建没放前端时返回 false。
+// embeddedFrontend 返回编进二进制的前端。前端只从这里来：构建时先把
+// frontend/dist 复制进 cmd/webui/webdist（make build 会做），没复制就返回 false。
 func embeddedFrontend() (fs.FS, bool) {
 	sub, err := fs.Sub(embeddedFrontendFiles, "webdist")
 	if err != nil {
@@ -24,12 +25,11 @@ func embeddedFrontend() (fs.FS, bool) {
 	return sub, true
 }
 
-// frontendFileSystem 选出要服务的前端：发布包内嵌的前端优先，这样升级后不会被
-// 旧安装留下的 frontend-next/dist 盖住；没有内嵌时才按目录查找。
-func frontendFileSystem(custom string) (http.FileSystem, string) {
-	if sub, ok := embeddedFrontend(); ok {
-		return http.FS(sub), "embedded"
+// frontendFileSystem 返回要服务的前端；没编进前端时页面请求一律 404，启动日志会提示。
+func frontendFileSystem() (http.FileSystem, bool) {
+	sub, ok := embeddedFrontend()
+	if !ok {
+		return http.FS(embed.FS{}), false
 	}
-	dir := frontendDistDir(custom)
-	return http.Dir(dir), dir
+	return http.FS(sub), true
 }
