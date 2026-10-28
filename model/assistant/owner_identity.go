@@ -32,6 +32,12 @@ func (cfg BotConfig) OwnerIDForEvent(event MessageEvent) string {
 	if owner == "" && event.webChat {
 		return strings.TrimSpace(event.UserID)
 	}
+	// 账号关联到主人：标记只由入站时的 withLinkedOwner 按这台机器人的配置打上（规则见
+	// linkedOwnerFor），平台消息伪造不了；机器人、自己发出的消息和别的机器人的配置一律不认。
+	if event.linkedOwner && !event.SenderIsBot && !event.Outbound && strings.TrimSpace(event.UserID) != "" &&
+		(cfg.ID == "" || event.ProfileID == "" || cfg.ID == event.ProfileID) {
+		return strings.TrimSpace(event.UserID)
+	}
 	if cfg.Platform != PlatformTelegram || event.Platform != PlatformTelegram || event.SenderIsBot || event.Outbound || (cfg.ID != "" && event.ProfileID != "" && cfg.ID != event.ProfileID) {
 		return owner
 	}
@@ -79,22 +85,11 @@ func (cfg BotConfig) IsManagerEvent(event MessageEvent) bool {
 	return cfg.IsOwnerEvent(event) || cfg.IsAdminEvent(event)
 }
 
-// managesUserID 按账号 ID 判断有没有管理权限，给保存前的二次核对用：那时手里只剩
-// 发起人的 ID，没有完整事件。
-func (cfg BotConfig) managesUserID(userID string) bool {
-	userID = strings.TrimSpace(userID)
-	if userID == "" {
-		return false
-	}
-	if owner := strings.TrimSpace(cfg.OwnerID); owner != "" && owner == userID {
-		return true
-	}
-	for _, admin := range cfg.AdminIDs {
-		if strings.TrimSpace(admin) == userID {
-			return true
-		}
-	}
-	return false
+// managesEvent 是保存前的二次核对：按落库前那一刻的配置重新判一次发起人还有没有
+// 管理权限。用完整事件而不是只看账号 ID，否则因账号关联算主人、或主人配成
+// Telegram @用户名的人会在这一步被误拒。
+func (cfg BotConfig) managesEvent(event MessageEvent) bool {
+	return strings.TrimSpace(event.UserID) != "" && cfg.IsManagerEvent(event)
 }
 
 // normalizeAdminIDs 去重去空，并去掉主人自己：主人本来就有全部权限，列进管理员
@@ -147,6 +142,8 @@ func (r *Runtime) rememberTelegramOwnerID(event MessageEvent) {
 		return
 	}
 	cfg := r.effectiveConfigForEvent(event)
+	// 只记配置里那个主人的号：因关联算主人的是他的另一个账号，不能顶掉私聊通知的去处。
+	event.linkedOwner = false
 	if TelegramOwnerUsername(cfg.OwnerID) == "" || !cfg.IsOwnerEvent(event) || !allASCIIDigits(strings.TrimSpace(event.UserID)) {
 		return
 	}

@@ -372,6 +372,8 @@ func (h *BotHandler) registerRoutes(router gin.IRouter, base string) {
 	router.GET(base+"/favorability/evaluations", h.listRelationshipEvaluations)
 	router.GET(base+"/user-names", h.lookupAssistantUserNames)
 	router.POST(base+"/owner-bind", h.bindOwnerByCode)
+	router.GET(base+"/identity-links", h.listIdentityLinks)
+	router.POST(base+"/identity-links/unlink", h.unlinkIdentityAccount)
 	router.GET(base+"/users/:id", h.getAssistantUser)
 	router.PUT(base+"/users/:id", h.editAssistantUser)
 	router.DELETE(base+"/users/:id", h.editAssistantUser)
@@ -905,53 +907,27 @@ type botTransportConfig struct {
 	WeixinBaseURL  string
 }
 
-// platformCredentials 是 QQ 官方、钉钉、飞书、企业微信、iMessage 通道建连时读的配置，
+// platformCredentials 是 QQ 官方、iMessage 通道建连时读的配置，
 // 与 assistant.NewChannelForConfig 传进各通道的字段一一对应。只做相等比较，不落日志。
 type platformCredentials struct {
-	QQAppID                 string
-	QQAppSecret             string
-	QQSandbox               bool
-	DingTalkClientID        string
-	DingTalkClientSecret    string
-	DingTalkRobotCode       string
-	FeishuAppID             string
-	FeishuAppSecret         string
-	FeishuVerificationToken string
-	FeishuEncryptKey        string
-	FeishuAPIBaseURL        string
-	WeComCorpID             string
-	WeComAgentID            string
-	WeComSecret             string
-	WeComToken              string
-	WeComEncodingAESKey     string
-	IMessageServerURL       string
-	IMessagePassword        string
-	IMessageWebhookToken    string
-	IMessagePollSeconds     int
+	QQAppID              string
+	QQAppSecret          string
+	QQSandbox            bool
+	IMessageServerURL    string
+	IMessagePassword     string
+	IMessageWebhookToken string
+	IMessagePollSeconds  int
 }
 
 func platformCredentialsOf(profile assistant.BotConfig) platformCredentials {
 	return platformCredentials{
-		QQAppID:                 profile.QQAppID,
-		QQAppSecret:             profile.QQAppSecret,
-		QQSandbox:               profile.QQSandbox,
-		DingTalkClientID:        profile.DingTalkClientID,
-		DingTalkClientSecret:    profile.DingTalkClientSecret,
-		DingTalkRobotCode:       profile.DingTalkRobotCode,
-		FeishuAppID:             profile.FeishuAppID,
-		FeishuAppSecret:         profile.FeishuAppSecret,
-		FeishuVerificationToken: profile.FeishuVerificationToken,
-		FeishuEncryptKey:        profile.FeishuEncryptKey,
-		FeishuAPIBaseURL:        profile.FeishuAPIBaseURL,
-		WeComCorpID:             profile.WeComCorpID,
-		WeComAgentID:            profile.WeComAgentID,
-		WeComSecret:             profile.WeComSecret,
-		WeComToken:              profile.WeComToken,
-		WeComEncodingAESKey:     profile.WeComEncodingAESKey,
-		IMessageServerURL:       profile.IMessageServerURL,
-		IMessagePassword:        profile.IMessagePassword,
-		IMessageWebhookToken:    profile.IMessageWebhookToken,
-		IMessagePollSeconds:     profile.IMessagePollSeconds,
+		QQAppID:              profile.QQAppID,
+		QQAppSecret:          profile.QQAppSecret,
+		QQSandbox:            profile.QQSandbox,
+		IMessageServerURL:    profile.IMessageServerURL,
+		IMessagePassword:     profile.IMessagePassword,
+		IMessageWebhookToken: profile.IMessageWebhookToken,
+		IMessagePollSeconds:  profile.IMessagePollSeconds,
 	}
 }
 

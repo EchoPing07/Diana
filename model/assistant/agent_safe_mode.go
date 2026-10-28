@@ -239,6 +239,7 @@ var AgentSafeModeRules = []AgentSafeModeRule{
 		Operations: []string{"create", "update", "comment", "review", "close", "reopen", "star", "approve"},
 		Reason:     "以主人配置的 GitHub 身份写入仓库；读仓库、搜 Issue 照常"},
 	{Category: safeModeCategoryActAsOwner, Tool: dianaCrossSessionToolName, Reason: "往当前会话以外的私聊或群发消息"},
+	{Category: safeModeCategoryActAsOwner, Tool: dianaCrossPlatformToolName, Field: "operation", Operations: []string{"send"}, Reason: "往别的机器人（别的平台）的群或私聊发消息；查看照常"},
 	// 事件触发任务：盯别的群或任何地方的（where=group / anywhere）等于一条往别的会话
 	// 发话、在别处跑 Agent 的长期通道，关掉；只盯当前会话、结果也发回当前会话的照常，
 	// 查看、取消、删除照常。取保守的一边：where=group 哪怕填的就是当前群也算别处。
@@ -282,6 +283,7 @@ var AgentSafeModeRules = []AgentSafeModeRule{
 		Operations: platformModerationOperations,
 		Reason:     "禁言、踢人、群公告、精华、名片头衔、全员禁言、撤回成员消息等群管操作；查群资料、撤回自己的消息照常"},
 	{Category: safeModeCategorySelfModify, Tool: dianaOneBotRequestsToolName, Field: "operation", Operations: []string{"approve", "reject"}, Reason: "同意或拒绝好友、加群请求；查看照常"},
+	{Category: safeModeCategorySelfModify, Tool: dianaIdentityLinksToolName, Field: "operation", Operations: []string{"link", "unlink"}, Reason: "关联或解除跨平台账号（关联到主人的账号会被认作主人）；查看照常"},
 }
 
 // restrictAgentConfigForMode 在安全模式下从源头上不构造高风险工具：命令开关关掉

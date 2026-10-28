@@ -18,6 +18,7 @@ import type {
   AppLogEntry,
   AssistantEventDetail,
   AssistantTask,
+  IdentityPerson,
   BrowserBoxSettings,
   BrowserControlToken,
   LLMConfig,
@@ -450,6 +451,17 @@ function demoMemorySource(memory: UserStructuredMemory): AssistantMemorySource {
 }
 
 
+// 青禾在 QQ 和 Telegram 上各有一个号，用「绑定账号」验证码自助关联过。
+const demoIdentityPeople: IdentityPerson[] = [
+  {
+    person_id: "demo-person-qinghe",
+    accounts: [
+      { person_id: "demo-person-qinghe", profile_id: "bot-onebot", platform: "onebot-v11", user_id: "100200711", display_name: "青禾", source: "self_bind", created_at: before(4300) },
+      { person_id: "demo-person-qinghe", profile_id: "bot-telegram", platform: "telegram", user_id: "880024", username: "qinghe_dev", display_name: "青禾", source: "self_bind", created_at: before(4300) }
+    ]
+  }
+];
+
 const demoUsers: UserMemoryProfile[] = [
   {
     user_id: "100200711", display_name: "青禾", favorability: 62, message_count: 1843, last_seen_at: before(2), updated_at: before(2),
@@ -723,9 +735,6 @@ const platforms: BotPlatform[] = [
   { id: "onebot-v11", name: "QQ · OneBot v11", protocol: "onebot-v11", category: "qq", category_label: "QQ", description: "推荐通过 SnowLuma 接入 OneBot v11。", inbound: "reverse_ws" },
   { id: "telegram", name: "Telegram Bot", protocol: "telegram-bot-api", category: "telegram", category_label: "Telegram", description: "通过 Telegram Bot API 长轮询接入。", inbound: "outbound", rich_text: true },
   { id: "qq-official", name: "QQ 官方机器人", protocol: "qq-official-gateway-ws", category: "qq_official", category_label: "QQ 官方机器人", description: "QQ 开放平台 WebSocket 网关，出站长连接，不需要公网地址", inbound: "outbound", rich_text: true },
-  { id: "dingtalk", name: "钉钉", protocol: "dingtalk-stream-ws", category: "dingtalk", category_label: "钉钉", description: "Stream 模式出站长连接，不需要公网地址", inbound: "outbound", rich_text: true, untested: true },
-  { id: "feishu", name: "飞书", protocol: "feishu-event-callback", category: "feishu", category_label: "飞书", description: "事件订阅回调，需要一个公网可达的回调地址", inbound: "callback", callback_path: "/api/channels/feishu/callback", rich_text: true, untested: true },
-  { id: "wecom", name: "企业微信", protocol: "wecom-event-callback", category: "wecom", category_label: "企业微信", description: "应用回调，需要一个公网可达的回调地址", inbound: "callback", callback_path: "/api/channels/wecom/callback", rich_text: true, untested: true },
   { id: "weixin", name: "微信", protocol: "weixin-ilink-longpoll", category: "weixin", category_label: "微信", description: "腾讯 iLink Bot 扫码登录，长轮询收发私聊，不需要公网地址", inbound: "outbound", untested: true },
   { id: "imessage", name: "iMessage", protocol: "bluebubbles", category: "imessage", category_label: "iMessage", description: "通过 Mac 上的 BlueBubbles Server 收发，webhook 回调需要 Mac 能访问到本机", inbound: "callback", callback_path: "/api/channels/imessage/callback", untested: true }
 ];
@@ -2106,6 +2115,20 @@ async function demoFetch(input: RequestInfo | URL, init?: RequestInit): Promise<
       portrait_count: user.portrait?.length ?? 0
     }));
     return json({ users, total: matched.length, query: keyword || undefined, sort, order, limit: 50, offset: 0 });
+  }
+  if (path === "/api/assistant/identity-links") {
+    return json({ people: demoIdentityPeople.filter((person) => person.accounts.length > 1) });
+  }
+  if (path === "/api/assistant/identity-links/unlink" && method === "POST") {
+    for (const person of demoIdentityPeople) {
+      const index = person.accounts.findIndex((account) =>
+        account.profile_id === body.profile_id && account.platform === body.platform && account.user_id === body.user_id);
+      if (index >= 0) {
+        person.accounts.splice(index, 1);
+        return json({ removed: true });
+      }
+    }
+    return json({ error: "这个账号没有关联" }, 404);
   }
   // 演示里没有真人去发「绑定主人」，任意 6 位数字都当作那个人拿到的验证码。
   if (path === "/api/assistant/owner-bind" && method === "POST") {

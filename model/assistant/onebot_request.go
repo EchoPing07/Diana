@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	dianaOneBotRequestsToolName = "onebot_requests"
+	dianaOneBotRequestsToolName = "platform_requests"
 	oneBotRequestListLimit      = 20
 	oneBotRequestTextLimit      = 200
 )
@@ -152,7 +152,7 @@ func (r *Runtime) handleOneBotRequest(ctx context.Context, event MessageEvent) e
 		Status: OneBotRequestPending, CreatedAt: now, UpdatedAt: now,
 	})
 	if err != nil {
-		return fmt.Errorf("persist OneBot request: %w", err)
+		return fmt.Errorf("persist platform request: %w", err)
 	}
 	if !inserted {
 		return nil
@@ -161,7 +161,7 @@ func (r *Runtime) handleOneBotRequest(ctx context.Context, event MessageEvent) e
 		At: now, Kind: EventKindRequest, Platform: event.Platform, ProfileID: event.ProfileID,
 		UserID: event.UserID, GroupID: event.GroupID, MessageID: event.MessageID,
 		Text: oneBotRequestSummary(request.RequestType, request.SubType), Handled: true,
-		Outcome: "onebot_request_pending", Decision: "pending", Reason: "OneBot 请求已持久化并等待主人处理",
+		Outcome: "onebot_request_pending", Decision: "pending", Reason: "好友或入群请求已持久化并等待主人处理",
 	})
 	// 群申请和邀请只留待主动查询，不再私聊推送给主人。
 	if request.RequestType == "group" {
@@ -178,7 +178,7 @@ func (r *Runtime) handleOneBotRequest(ctx context.Context, event MessageEvent) e
 	}
 	if err := r.sendNotification(ctx, notifyEvent, oneBotRequestOwnerNotice(record)); err != nil {
 		// 请求已经安全落库，通知失败不能把同一平台事件变成未处理；主人之后仍可
-		// 通过 onebot_requests list 找到它。
+		// 通过 platform_requests list 找到它。
 		log.Printf("diana OneBot request owner notification failed: type=%s sub_type=%s request_id=%s: %v", record.RequestType, record.SubType, record.ID, err)
 		return nil
 	}
@@ -209,6 +209,16 @@ func oneBotRequestOwnerNotice(item OneBotRequestRecord) string {
 	return strings.Join(lines, "\n")
 }
 
+// platformSupportsJoinRequests 判断平台有没有可审批的好友/入群请求。QQ 官方机器人
+// 是被群管理员直接拉进群的，没有申请这一步，也没有替群审批入群的接口。
+func platformSupportsJoinRequests(platform string) bool {
+	switch NormalizePlatformID(platform) {
+	case PlatformOneBotV11, PlatformTelegram:
+		return true
+	}
+	return false
+}
+
 type dianaOneBotRequestsTool struct {
 	runtime *Runtime
 	event   MessageEvent
@@ -221,12 +231,12 @@ func newDianaOneBotRequestsTool(runtime *Runtime, event MessageEvent) *dianaOneB
 func (*dianaOneBotRequestsTool) Name() string { return dianaOneBotRequestsToolName }
 
 func (*dianaOneBotRequestsTool) Description() string {
-	return "列出并处理 OneBot 好友请求、入群申请和群邀请，仅主人。批准或拒绝须对应用户明确的决定。flag 由工具内部保存，不要向用户索要或展示。"
+	return "列出并处理好友请求、入群申请和群邀请（QQ 的 OneBot 与 Telegram 审核入群），仅主人。批准或拒绝须对应用户明确的决定。flag 由工具内部保存，不要向用户索要或展示。"
 }
 
 func (*dianaOneBotRequestsTool) InputSchema() map[string]any {
 	return toolObjectSchema([]string{"operation"}, map[string]any{
-		"operation": toolEnumParam("list 查看待处理请求", "list", "approve", "reject"),
+		"operation": toolEnumParam("list 查看待处理请求（QQ 会先从平台补拉漏掉的入群申请和被折叠的好友申请）；sync 只补拉", "list", "sync", "approve", "reject"),
 		"id":        toolStringParam("approve/reject 必填：请求编号，来自通知或 list"),
 		"reason":    toolStringParam("拒绝群申请/邀请的原因，≤200 字"),
 		"remark":    toolStringParam("同意好友时的备注，≤200 字"),
@@ -235,7 +245,7 @@ func (*dianaOneBotRequestsTool) InputSchema() map[string]any {
 
 func (t *dianaOneBotRequestsTool) Run(ctx context.Context, input map[string]any) (string, error) {
 	if t == nil || t.runtime == nil || t.runtime.oneBotRequestStore() == nil {
-		return "", fmt.Errorf("OneBot 请求存储未配置")
+		return "", fmt.Errorf("好友与入群请求存储未配置")
 	}
 	if !t.runtime.relationshipPolicy(ctx, t.event).Owner {
 		return "", fmt.Errorf("只有机器人主人可以处理好友或群请求")
@@ -243,12 +253,27 @@ func (t *dianaOneBotRequestsTool) Run(ctx context.Context, input map[string]any)
 	profileID := strings.TrimSpace(t.event.ProfileID)
 	operation := t.CanonicalOperation(input)
 	store := t.runtime.oneBotRequestStore()
-	if operation == "list" {
+	if operation == "list" || operation == "sync" {
+		message := ""
+		if IsOneBotPlatform(t.runtime.currentPlatform(t.event)) {
+			found, syncErr := t.runtime.syncOneBotPendingRequests(ctx, t.event)
+			switch {
+			case syncErr != nil && operation == "sync":
+				return "", fmt.Errorf("从平台补拉请求失败：%w", syncErr)
+			case syncErr != nil:
+				// 补拉是兜底，失败不影响列出已经存下的请求。
+				message = "没能从平台补拉漏掉的请求（" + syncErr.Error() + "），下面只有收到过推送的。"
+			case found > 0:
+				message = fmt.Sprintf("从平台补拉到 %d 条之前没收到推送的请求。", found)
+			}
+		} else if operation == "sync" {
+			return "", fmt.Errorf("当前平台没有可补拉的请求列表，入群申请只能靠平台推送")
+		}
 		items, err := store.ListOneBotRequests(ctx, profileID, OneBotRequestPending, oneBotRequestListLimit)
 		if err != nil {
 			return "", err
 		}
-		return marshalOneBotRequestToolResult(operation, items, "")
+		return marshalOneBotRequestToolResult(operation, items, message)
 	}
 	if operation != "approve" && operation != "reject" {
 		return "", fmt.Errorf("不支持的 operation %q", operation)
@@ -265,7 +290,7 @@ func (t *dianaOneBotRequestsTool) Run(ctx context.Context, input map[string]any)
 		return "", fmt.Errorf("没有找到请求 %s", id)
 	}
 	if item.Status != OneBotRequestPending {
-		return marshalOneBotRequestToolResult(operation, []OneBotRequestRecord{item}, "请求已经处理过，没有重复调用 OneBot")
+		return marshalOneBotRequestToolResult(operation, []OneBotRequestRecord{item}, "请求已经处理过，没有重复调用平台接口")
 	}
 	approve := operation == "approve"
 	action, params, err := oneBotRequestAction(item, approve, input)
@@ -273,10 +298,16 @@ func (t *dianaOneBotRequestsTool) Run(ctx context.Context, input map[string]any)
 		return "", err
 	}
 	callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	_, callErr := t.runtime.callOneBotAPIForEvent(callCtx, MessageEvent{ProfileID: item.ProfileID, Platform: item.Platform}, action, params)
+	requestEvent := MessageEvent{ProfileID: item.ProfileID, Platform: item.Platform}
+	var callErr error
+	if IsOneBotPlatform(item.Platform) {
+		_, callErr = t.runtime.callOneBotAPIForEvent(callCtx, requestEvent, action, params)
+	} else {
+		_, callErr = t.runtime.callPlatformAPIForEvent(callCtx, requestEvent, action, params)
+	}
 	cancel()
 	if callErr != nil {
-		return "", fmt.Errorf("OneBot 请求处理失败: %w", callErr)
+		return "", fmt.Errorf("请求处理失败: %w", callErr)
 	}
 	status := OneBotRequestApproved
 	if !approve {
@@ -299,9 +330,26 @@ func (t *dianaOneBotRequestsTool) Run(ctx context.Context, input map[string]any)
 }
 
 func oneBotRequestAction(item OneBotRequestRecord, approve bool, input map[string]any) (string, map[string]any, error) {
+	if NormalizePlatformID(item.Platform) == PlatformTelegram {
+		// Telegram 只有审核入群这一种请求，拒绝不带原因。
+		chatID, userID, ok := parseTelegramJoinRequestFlag(item.Flag)
+		if !ok {
+			return "", nil, fmt.Errorf("请求 %s 的 Telegram 句柄无效", item.ID)
+		}
+		action := "approveChatJoinRequest"
+		if !approve {
+			action = "declineChatJoinRequest"
+		}
+		return action, map[string]any{"chat_id": chatID, "user_id": oneBotIDParam(userID)}, nil
+	}
 	params := map[string]any{"flag": item.Flag, "approve": approve}
 	switch item.RequestType {
 	case "friend":
+		// 被 QQ 折叠的可疑好友申请走另一组接口，flag 是申请人的 uid，不能带备注。
+		if item.SubType == oneBotRequestSubTypeDoubt {
+			params["flag"] = doubtRequestUID(item.Flag)
+			return "set_doubt_friends_add_request", params, nil
+		}
 		if approve {
 			if remark := truncateForChat(configToolString(input, "remark"), oneBotRequestTextLimit); remark != "" {
 				params["remark"] = remark

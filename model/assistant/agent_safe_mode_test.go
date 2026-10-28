@@ -183,6 +183,8 @@ func safeModeRegistryForEvent(t *testing.T, mode string, event MessageEvent, rem
 		newDianaBotConfigTool(runtime, event),
 		newDianaReplyBlockTool(runtime, event),
 		newDianaOneBotRequestsTool(runtime, event),
+		newDianaIdentityLinksTool(runtime, event),
+		newDianaCrossPlatformTool(runtime, event),
 		newDianaLLMConfigTool(runtime, event),
 		newDianaRuntimeConfigTool(runtime, event),
 		newDianaCodingTool(runtime, event, codingSettings(nil)),
@@ -385,8 +387,11 @@ func TestSafeModeRunnerRejectsOperationAliases(t *testing.T) {
 		{"platform", map[string]any{"operation": "KICK", "user_id": "10002"}},
 		{"platform", map[string]any{"operation": "mute", "user_id": "10002", "duration": 60}},
 		{"platform", map[string]any{"operation": "unmute", "user_id": "10002"}},
-		{"onebot_requests", map[string]any{"operation": "approve", "id": "1"}},
-		{"onebot_requests", map[string]any{"operation": "Reject", "id": "1"}},
+		{"platform_requests", map[string]any{"operation": "approve", "id": "1"}},
+		{"platform_requests", map[string]any{"operation": "Reject", "id": "1"}},
+		{"identity_links", map[string]any{"operation": "link", "user_id": "10001", "other_user_id": "10002"}},
+		{"identity_links", map[string]any{"operation": "Unlink", "user_id": "10001"}},
+		{"cross_platform", map[string]any{"operation": " SEND ", "profile_id": "bot-b", "group_id": "20002", "message": "x"}},
 		{agent.ManageFilesToolName, map[string]any{"action": "DELETE", "path": "a.txt"}},
 		{agent.ManageFilesToolName, map[string]any{"action": "move", "path": "a.txt", "to": "b.txt"}},
 		{agent.ManageFilesToolName, map[string]any{"action": "mkdir", "path": "keep/x"}},
@@ -425,7 +430,9 @@ func TestSafeModeRunnerRejectsOperationAliases(t *testing.T) {
 		{"reply_block", map[string]any{"operation": "list"}},
 		{"extension_access", map[string]any{}},
 		{"platform", map[string]any{"operation": "recall"}},
-		{"onebot_requests", map[string]any{"operation": "list"}},
+		{"platform_requests", map[string]any{"operation": "list"}},
+		{"identity_links", map[string]any{"operation": "list"}},
+		{"cross_platform", map[string]any{"operation": "bots"}},
 		{agent.ManageFilesToolName, map[string]any{"action": "stat", "path": "a.txt"}},
 		{"event_trigger", map[string]any{"operation": "add", "message": "hi"}},
 		{"event_trigger", map[string]any{"operation": "create", "where": "here", "message": "hi"}},
@@ -732,7 +739,7 @@ func TestHeldTasksResumeWithOriginalTimeOrExpire(t *testing.T) {
 	}
 }
 
-// 飞书 ou_xxx、QQ 官方 openid 这类非数字账号：身份比较不能靠只认数字的
+// ou_xxx、QQ 官方 openid 这类非数字账号：身份比较不能靠只认数字的
 // normalizeRelationshipUserID，否则两个不同的人都成了空串、被当成同一个人，改别人私聊
 // 里的订阅就不算「别处」了。
 func TestSafeModeComparesNonNumericAccountIDs(t *testing.T) {
@@ -742,7 +749,7 @@ func TestSafeModeComparesNonNumericAccountIDs(t *testing.T) {
 		{ID: "rss-ou-own", Kind: ReminderKindRSSWatch, ProfileID: "bot-a", OwnerID: "ou_owner", UserID: "ou_owner", Message: "盯博客", IntervalSeconds: 3600, TriggerAt: future},
 		{ID: "gh-ou-other", Kind: ReminderKindRepositoryWatch, ProfileID: "bot-a", OwnerID: "ou_other", UserID: "ou_other", Repository: "octo/demo", IntervalSeconds: 3600, TriggerAt: future},
 	}}
-	registry, _ := safeModeRegistryForEvent(t, AgentModeSafe, MessageEvent{Kind: EventKindPrivate, Platform: PlatformFeishu, UserID: "ou_owner", ProfileID: "bot-a"}, store)
+	registry, _ := safeModeRegistryForEvent(t, AgentModeSafe, MessageEvent{Kind: EventKindPrivate, Platform: PlatformQQOfficial, UserID: "ou_owner", ProfileID: "bot-a"}, store)
 	for _, tc := range []struct {
 		tool  string
 		input map[string]any

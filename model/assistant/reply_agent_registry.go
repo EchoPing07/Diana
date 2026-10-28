@@ -99,6 +99,12 @@ func (r *Runtime) newReplyAgentRegistry(ctx context.Context, cfg BotConfig, even
 		} else {
 			deniedTools = append(deniedTools, dianaCrossSessionToolName)
 		}
+		// 跨机器人读写只给主人，而且实例里至少要有另一台在跑的机器人才有意义。
+		if relationship.Owner && len(r.runnableProfiles()) > 1 {
+			extraTools = append(extraTools, newDianaCrossPlatformTool(r, event))
+		} else if len(r.runnableProfiles()) > 1 {
+			deniedTools = append(deniedTools, dianaCrossPlatformToolName)
+		}
 		if supportsOneBotGroupTool(cfg, event) {
 			extraTools = append(extraTools, newDianaGroupTool(r, event))
 		}
@@ -124,8 +130,13 @@ func (r *Runtime) newReplyAgentRegistry(ctx context.Context, cfg BotConfig, even
 		if memoryAvailable {
 			extraTools = append(extraTools, &dianaMemoryTool{runtime: r, event: event})
 		}
-		if r.oneBotRequestStore() != nil && IsOneBotPlatform(r.currentPlatform(event)) && r.platformInterfaceEnabled(event) {
+		if r.oneBotRequestStore() != nil && platformSupportsJoinRequests(r.currentPlatform(event)) && r.platformInterfaceEnabled(event) {
 			extraTools = append(extraTools, newDianaOneBotRequestsTool(r, event))
+		}
+		// 账号关联只给真正的主人：relationship 在这里已经按 toolScope 把管理员算成主人，
+		// 而管理员能关联就能把自己升成主人，所以按配置重新判一次。
+		if r.identityLinkStore() != nil && (cfg.IsOwnerEvent(event) || isAdminChatRun(ctx)) {
+			extraTools = append(extraTools, newDianaIdentityLinksTool(r, event))
 		}
 		// 关系图按插件开关走：不是每个群都想让机器人画这个，渲染也要占一次
 		// 无头浏览器。插件停用时模型看不到这个工具。

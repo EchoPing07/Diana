@@ -25,6 +25,9 @@ func registerBotConfigSecrets(cfg BotConfig) {
 		cfg.OneBotAccessToken,
 		cfg.TelegramBotToken,
 		cfg.QQAppSecret,
+		cfg.WeixinBotToken,
+		cfg.IMessagePassword,
+		cfg.IMessageWebhookToken,
 		cfg.DingTalkClientSecret,
 		cfg.FeishuAppSecret,
 		cfg.FeishuVerificationToken,
@@ -32,9 +35,6 @@ func registerBotConfigSecrets(cfg BotConfig) {
 		cfg.WeComSecret,
 		cfg.WeComToken,
 		cfg.WeComEncodingAESKey,
-		cfg.WeixinBotToken,
-		cfg.IMessagePassword,
-		cfg.IMessageWebhookToken,
 	)
 	secretmask.RegisterURL(
 		cfg.OneBotWSEndpoint,
@@ -42,7 +42,6 @@ func registerBotConfigSecrets(cfg BotConfig) {
 		cfg.OneBotReverseWSEndpoint,
 		cfg.TelegramAPIBaseURL,
 		cfg.TelegramProxyURL,
-		cfg.FeishuAPIBaseURL,
 		cfg.IMessageServerURL,
 		cfg.AgentBrowserCDPURL,
 	)
