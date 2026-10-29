@@ -640,6 +640,8 @@ type Runtime struct {
 	proactiveBatches      map[string]*proactiveReplyBatch
 	proactiveBatchWindow  time.Duration
 	proactiveBatchMaxWait time.Duration
+	// proactiveRouteDebounce 是接话评分前的防抖窗口，见 proactive_route_debounce.go。
+	proactiveRouteDebounce time.Duration
 	// 连续失败时的错误提示节流状态，见 error_notice_burst.go。
 	errorNoticeMu          sync.Mutex
 	errorNoticeBursts      map[string]*errorNoticeBurst
@@ -900,6 +902,7 @@ func NewRuntime(cfg BotConfig, channel Channel, plugins *PluginManager, llmStore
 		activeDirectReplies:     map[string]*activeDirectReply{},
 		proactiveBatchWindow:    defaultProactiveReplyBatchWindow,
 		proactiveBatchMaxWait:   defaultProactiveReplyBatchMaxWait,
+		proactiveRouteDebounce:  defaultProactiveRouteDebounce,
 		errorNoticeBursts:       map[string]*errorNoticeBurst{},
 		errorNoticeQuiet:        defaultErrorNoticeBurstQuiet,
 		errorNoticeMaxWait:      defaultErrorNoticeBurstMaxWait,
@@ -2146,6 +2149,12 @@ func (r *Runtime) routeMessageEvent(ctx context.Context, event MessageEvent) (Me
 	if considerProactive {
 		proactiveCandidates = append(proactiveCandidates, proactiveReplyCandidate{Event: event, Text: text})
 	}
+	if !handled && considerProactive && r.deferProactiveRouteToNewer(ctx, event) {
+		r.holdProactiveRouteForNewer(event, text, time.Now())
+		event.routingReason = "群里几秒内又有新消息，这条交给后面那条一起做接话评分"
+		r.record(r.decisionEventRecord(event, text, "merged_into_backlog_turn"))
+		return finishWithoutReply("merged_into_backlog_turn")
+	}
 	if !handled && len(proactiveCandidates) > 0 {
 		// Judge each candidate immediately. The semantic router already receives
 		// recent group context, so a debounce batch only adds latency and leaves the
@@ -2171,7 +2180,9 @@ func (r *Runtime) routeMessageEvent(ctx context.Context, event MessageEvent) (Me
 			successOutcome = "replied_proactive"
 			markReplyStage(ctx, replyStageDecided, time.Now())
 			r.prefetchCrossGroupContext(event)
-			if len(proactiveCandidates) > 1 {
+			if event.burstSplit {
+				event.backlogTurn = event.burstTargets
+			} else if len(proactiveCandidates) > 1 {
 				event.backlogTurn = backlogRoutedTurn(proactiveCandidates, turn, event.MessageID)
 			}
 		} else {
@@ -2972,7 +2983,7 @@ func (r *Runtime) routeProactiveReplyBatch(ctx context.Context, candidates []pro
 	routeContext := string(payloadJSON)
 	if chatIn.Participation != nil {
 		routeInstruction = cfg.prompt(promptParticipationRouteInstructionSpec)
-		decisionSpec = participationDecisionSpec(cfg.PromptOverrides)
+		decisionSpec = participationDecisionSpec(cfg.PromptOverrides, len(candidates)-1)
 		// 评分这一路喂按时间排的对话而不是整份 JSON，理由见 router_transcript.go。
 		routeContext = proactiveReplyTranscript(payload)
 	}
@@ -3004,7 +3015,15 @@ func (r *Runtime) routeProactiveReplyBatch(ctx context.Context, candidates []pro
 	// Old providers may still complete requests using the previous JSON contract.
 	// New rating responses never consult the legacy boolean fields.
 	if chatIn.Participation != nil && (chatIn.Participation.RelevanceLevel != "" || chatIn.Participation.ChatLevel != "" || !strings.Contains(raw, `"should_reply"`) || strings.Contains(raw, `"relevance"`) && !strings.Contains(raw, `"scores"`)) {
-		ratings, parseErr := parseParticipationRatings(raw)
+		burstCount := len(candidates) - 1
+		parse := func(raw string) (participationRatings, error) {
+			ratings, err := parseParticipationRatings(raw)
+			if err == nil {
+				err = ratings.requireBurst(burstCount)
+			}
+			return ratings, err
+		}
+		ratings, parseErr := parse(raw)
 		retried := false
 		if parseErr != nil {
 			// 宽松解析仍然失败时再问一次模型：同样的上下文，只在最前面多一条提醒。
@@ -3020,7 +3039,7 @@ func (r *Runtime) routeProactiveReplyBatch(ctx context.Context, candidates []pro
 			})
 			if retryErr == nil {
 				raw = retryRaw
-				ratings, parseErr = parseParticipationRatings(retryRaw)
+				ratings, parseErr = parse(retryRaw)
 			}
 		}
 		allowed, chatReply := false, false
@@ -3049,6 +3068,9 @@ func (r *Runtime) routeProactiveReplyBatch(ctx context.Context, candidates []pro
 			}
 		}
 		r.recordParticipationRatings(ctx, event, ratings, parseErr == nil, allowed, retried, cfg, raw)
+		if parseErr == nil && burstCount > 0 {
+			return r.splitBurstReplies(event, text, candidates[:burstCount], ratings, allowed)
+		}
 		return event, text, []proactiveReplyCandidate{{Event: event, Text: text}}, allowed
 	}
 	decision, parsed := parseProactiveReplyDecision(raw)
