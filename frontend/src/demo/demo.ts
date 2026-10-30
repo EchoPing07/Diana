@@ -265,6 +265,7 @@ let plugins: PluginState[] = [
     manifest: { id: "official.rss-watch", name: "RSS 订阅", version: "0.2.0", description: "按条件监控 RSS 或社交动态，一条订阅可同时盯多个账号或 Feed，判断后发送到指定群聊或私聊。", official: true, built_in: true, permissions: ["网络请求", "消息发送"], settings: [{ key: "default_interval_seconds", label: "默认检查周期", type: "number", default: 300, min: 30, max: 86400, unit: "秒" }, { key: "failure_alert_threshold", label: "连续失败几次才报", description: "订阅连着失败到这个次数才在聊天里说一声，一轮故障只报一次，恢复后再说一声好了。报不报看下面的「发送错误通知」和机器人配置里的「出错时在聊天里提示」，任一关着都不报。", type: "number", default: 5, min: 1, max: 100, step: 1, unit: "次" }, { key: "error_notice", label: "发送错误通知", description: "这个插件失败时是否在聊天里说明。关掉后失败仍然记入事件和日志，只是不再打扰聊天。机器人的「错误提示」关掉时，这里开着也不会发。", type: "bool", default: true }] },
     installed: true, enabled: true
   },
+  { manifest: { id: "official.qq-join-approval", name: "QQ 入群自动审批", version: "0.1.0", description: "自动处理 QQ 群的入群申请：按验证消息、问答答案、昵称等规则直接通过或拒绝，也可以管理 QQ 开放平台的白名单 QQ 号策略。机器人需是群管理员；平台不提供申请人等级。", official: true, built_in: true, platforms: ["qq-official"], permissions: ["qq_official:join_approval_strategy", "qq_official:join_request_approve"], settings: [{ key: "mode", label: "审批方式", description: "关闭时申请只记成待办，由主人处理。机器人账号一律拒绝；拿不准的都留给主人。", type: "select", default: "off", options: [{ value: "off", label: "关闭" }, { value: "keywords", label: "按关键词" }, { value: "llm", label: "交给模型判断" }, { value: "keywords_llm", label: "先按关键词，没命中再交给模型" }] }, { key: "approve_keywords", label: "通过关键词", description: "验证消息、问答答案或昵称含其中任一词就通过，每行一个。", type: "text", default: "", rows: 3, show_when: { key: "mode", values: ["keywords", "keywords_llm"] } }, { key: "reject_keywords", label: "拒绝关键词", description: "含其中任一词就拒绝，优先于通过关键词，每行一个。", type: "text", default: "", rows: 2, show_when: { key: "mode", values: ["keywords", "keywords_llm"] } }, { key: "llm_requirement", label: "入群要求", description: "写给模型看的放行标准，例如「只收本校学生，验证消息要写学院和年级；广告号拒绝」。", type: "text", default: "", rows: 3, show_when: { key: "mode", values: ["llm", "keywords_llm"] } }, { key: "llm_model", label: "判断用的模型", type: "llm_profile", default: "", show_when: { key: "mode", values: ["llm", "keywords_llm"] } }, { key: "reject_delay_minutes", label: "拒绝前等待", description: "0 表示立即拒绝；期间有人手动处理过就不再动。", type: "number", default: 0, min: 0, max: 1440, step: 1, unit: "分钟", show_when: { key: "mode", values: ["keywords", "llm", "keywords_llm"] } }] }, installed: true, enabled: true },
   { manifest: { id: "official.status-command", name: "状态查询", version: "0.1.1", description: "群里或私聊发一条 #diana（整条消息只有这一个词）就回一张运行状态卡片：版本、平台、已运行时长。不经过模型，回复固定且立刻返回，用来确认机器人还活着。默认开启，同一会话默认冷却 5 秒。", official: true, built_in: true, permissions: ["message:read", "message:send"], settings: [{ key: "cooldown_seconds", label: "冷却时间", description: "同一群或私聊两次状态回复之间的最短间隔；设为 0 可关闭冷却。", type: "number", default: 5, min: 0, max: 3600, step: 1, unit: "秒" }] }, installed: true, enabled: true }
 ];
 
@@ -380,6 +381,9 @@ const groups: BotGroupSummary[] = [
 const demoLearnedStyle = "这个群说话很碎，一条消息大多十来个字，想到哪说到哪，连着发好几条很常见，基本不打句号。口头禅是「绷不住了」「哥几个」「这么强」，震惊时发「啊？」，捧场用「确实」「可以」。爱用 QQ 表情「吃瓜」「坐牢」代替表态。调侃很直接，互相叫外号、阴阳两句都不算事，但不会真骂人。聊代码和部署时会突然正经，贴报错、给链接，说完又回到玩梗。";
 const demoGroupStyles = new Map<string, import("../api").GroupStyle>([["100200301", { profile_id: "bot-onebot", group_id: "100200301", text: demoLearnedStyle, manual: false, sample_count: 286, updated_at: new Date(Date.now() - 5 * 3600_000).toISOString() }]]);
 
+const demoJoinStrategies: { strategy_id: string; group_openids?: string[]; group_ids?: string[]; whitelist_user_count: number; is_enable: "on" | "off"; expire_at: string; remark: string }[] = [
+  { strategy_id: "st_demo1", group_openids: ["D7A4E09C3B2F48A1965C0E7B13F2A8D4"], whitelist_user_count: 128, is_enable: "on", expire_at: "2027-06-30T00:00:00+08:00", remark: "老成员回群白名单" },
+];
 const demoAccountNames: Record<string, string> = { "100200001": "阿墨", "880024": "小林（演示）" };
 
 // 内置人设在真实后端里是编译进程序的几份 SOUL.md；演示模式读 Go 测试生成的那份 JSON
@@ -2157,6 +2161,36 @@ async function demoFetch(input: RequestInfo | URL, init?: RequestInit): Promise<
   if (path === "/api/assistant/owner-bind" && method === "POST") {
     if (!/^\d{6}$/.test(String(body.code ?? "").trim())) return json({ error: "验证码不对或已过期，请给机器人发「绑定主人」重新获取" }, 400);
     return json({ owner_id: "0D3CA1B2C3D4E5F60718293A4B5C6D7E" });
+  }
+  // 入群自动审批策略在演示里只存在内存，刷新即复原。
+  if (path === "/api/assistant/qq-join-strategy" && method === "POST") {
+    const id = String(body.strategy_id ?? "");
+    const req = (body.body ?? {}) as Record<string, unknown>;
+    const found = demoJoinStrategies.find((item) => item.strategy_id === id);
+    switch (body.op) {
+      case "list":
+        return json({ strategies: demoJoinStrategies });
+      case "create": {
+        const item = { strategy_id: `st_demo${demoJoinStrategies.length + 1}`, group_openids: (req.group_openids as string[]) ?? undefined, group_ids: (req.group_ids as string[]) ?? undefined, whitelist_user_count: 0, is_enable: "on" as const, expire_at: String(req.expire_at || new Date(Date.now() + 365 * 86400000).toISOString()), remark: String(req.remark ?? "") };
+        demoJoinStrategies.push(item);
+        return json({ strategy_id: item.strategy_id, is_enable: "on", expire_at: item.expire_at });
+      }
+      case "update":
+        if (!found) return json({ error: "策略不存在" }, 400);
+        if (req.is_enable) found.is_enable = req.is_enable as "on" | "off";
+        if (typeof req.remark === "string") found.remark = req.remark;
+        if (req.expire_at) found.expire_at = String(req.expire_at);
+        return json({});
+      case "whitelist":
+        if (!found) return json({ error: "策略不存在" }, 400);
+        found.whitelist_user_count = Math.max(0, found.whitelist_user_count + ((req.op === "add" ? 1 : -1) * ((req.whitelist_users as string[]) ?? []).length));
+        return json({ strategy_id: id, whitelist_user_count: found.whitelist_user_count });
+      case "delete":
+        demoJoinStrategies.splice(demoJoinStrategies.indexOf(found!), found ? 1 : 0);
+        return json({});
+      case "execute":
+        return json({});
+    }
   }
   if (path === "/api/assistant/user-names") {
     const ids = (url.searchParams.get("ids") ?? "").split(",").map((id) => id.trim()).filter(Boolean);

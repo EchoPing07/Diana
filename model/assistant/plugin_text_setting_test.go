@@ -41,6 +41,7 @@ func TestEveryDeclaredPluginSettingTypeIsSupported(t *testing.T) {
 		PluginSettingTypeMultiSelect:        []any{},
 		PluginSettingTypePlatformLevelRules: []any{},
 		PluginSettingTypeCodingAgents:       []any{},
+		PluginSettingTypeLLMProfile:         "",
 	}
 	for _, state := range NewDefaultPluginManager().List() {
 		manifest := state.Manifest
@@ -58,6 +59,18 @@ func TestEveryDeclaredPluginSettingTypeIsSupported(t *testing.T) {
 			if _, err := normalizeSettingValue(spec, sample); err != nil {
 				t.Errorf("%s 的设置 %q（类型 %s）存不住：%v", manifest.ID, spec.Key, spec.Type, err)
 			}
+		}
+	}
+}
+
+func TestParseLLMProfileSetting(t *testing.T) {
+	for value, want := range map[string][2]string{
+		`["provider-a","model-x"]`: {"provider-a", "model-x"},
+		"provider-a":               {"provider-a", ""},
+		"":                         {"", ""},
+	} {
+		if id, model := parseLLMProfileSetting(value); id != want[0] || model != want[1] {
+			t.Fatalf("%q -> %q %q", value, id, model)
 		}
 	}
 }

@@ -4,6 +4,7 @@
 package assistant
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"strings"
@@ -18,6 +19,8 @@ const (
 	PluginSettingTypeSelect             = "select"
 	PluginSettingTypeMultiSelect        = "multi_select"
 	PluginSettingTypePlatformLevelRules = "platform_level_rules"
+	// PluginSettingTypeLLMProfile 存一个模型配置 ID，前端渲染成模型下拉框；空串表示跟随对话模型。
+	PluginSettingTypeLLMProfile = "llm_profile"
 	// PluginSettingTypeText 渲染为多行文本框，用于模板这类带换行的配置。
 	PluginSettingTypeText = "text"
 	// PluginSettingTypeSize 的值统一是字节数，WebUI 渲染成「数字 + 单位」，
@@ -60,6 +63,25 @@ type PluginSettingSpec struct {
 	// administrators may edit group overrides, and members cannot edit shared
 	// settings. Values are owner, group_admin and member.
 	ConfigureBy []string `json:"configure_by,omitempty"`
+	// ShowWhen 让设置项只在另一个设置取某些值时显示，减少用不到的输入框。只影响界面。
+	ShowWhen *PluginSettingCondition `json:"show_when,omitempty"`
+}
+
+// parseLLMProfileSetting 拆开 llm_profile 设置：JSON 的 [提供商ID, 模型]；只填了
+// 提供商 ID 的旧写法按它的默认模型。
+func parseLLMProfileSetting(value string) (profileID, model string) {
+	value = strings.TrimSpace(value)
+	var pair []string
+	if strings.HasPrefix(value, "[") && json.Unmarshal([]byte(value), &pair) == nil && len(pair) == 2 {
+		return strings.TrimSpace(pair[0]), strings.TrimSpace(pair[1])
+	}
+	return value, ""
+}
+
+// PluginSettingCondition 是「Key 的当前值在 Values 里」。
+type PluginSettingCondition struct {
+	Key    string   `json:"key"`
+	Values []string `json:"values"`
 }
 
 const (
@@ -327,7 +349,7 @@ func normalizeSettingValue(spec PluginSettingSpec, raw any) (any, error) {
 		}
 		// 字节数没有小数概念，落库前取整。
 		return math.Round(number), nil
-	case PluginSettingTypeString, PluginSettingTypeText:
+	case PluginSettingTypeString, PluginSettingTypeText, PluginSettingTypeLLMProfile:
 		value, ok := raw.(string)
 		if !ok {
 			return nil, fmt.Errorf("diana: setting %q expects a string", spec.Key)

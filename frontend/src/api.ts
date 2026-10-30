@@ -579,7 +579,9 @@ export interface PluginSettingSpec {
   key: string;
   label: string;
   description?: string;
-  type: "bool" | "number" | "string" | "select" | "multi_select" | "text" | "size" | "platform_level_rules" | "coding_agents";
+  type: "bool" | "number" | "string" | "select" | "multi_select" | "text" | "size" | "platform_level_rules" | "coding_agents" | "llm_profile";
+  /** 只在另一个设置取这些值时显示。 */
+  show_when?: { key: string; values: string[] };
   default: unknown;
   min?: number;
   max?: number;
@@ -3821,6 +3823,29 @@ export function bindOwnerByCode(profile: string, code: string): Promise<{ owner_
   return requestJSON<{ owner_id: string }>(`/api/assistant/owner-bind?${new URLSearchParams({ profile }).toString()}`, {
     method: "POST",
     body: JSON.stringify({ code }),
+  });
+}
+
+/** QQ 官方机器人的入群自动审批策略，字段照开放平台原样。 */
+export interface QQJoinStrategy {
+  strategy_id: string;
+  group_openids?: string[];
+  group_ids?: string[];
+  whitelist_user_count?: number;
+  is_enable?: "on" | "off";
+  expire_at?: string;
+  created_at?: string;
+  updated_at?: string;
+  remark?: string;
+}
+
+export type QQJoinStrategyOp = "list" | "create" | "update" | "delete" | "execute" | "whitelist";
+
+/** 管理入群自动审批策略：一个入口按 op 分派，body 字段名照平台文档。 */
+export function qqJoinStrategy<T = Record<string, unknown>>(profile: string, op: QQJoinStrategyOp, strategyID = "", body?: Record<string, unknown>): Promise<T> {
+  return requestJSON<T>(`/api/assistant/qq-join-strategy?${new URLSearchParams({ profile }).toString()}`, {
+    method: "POST",
+    body: JSON.stringify({ op, strategy_id: strategyID, body }),
   });
 }
 
