@@ -132,7 +132,7 @@ func (p *RSSWatchPlugin) Manifest() PluginManifest {
 		ID:            rssWatchPluginID,
 		Name:          "RSS 订阅",
 		Version:       "0.2.13",
-		Description:   "订阅 RSS/Atom 或指定 X (Twitter) 用户，一条订阅可以同时盯多个账号或 Feed 并共用一套规则；规则留空时直接推送全部新条目；填写规则后由 LLM 筛选并生成回复。",
+		Description:   "订阅 RSS/Atom、指定 X (Twitter) 用户，或 B 站 UP 主动态、直播开播与番剧更新，一条订阅可以同时盯多个账号或 Feed 并共用一套规则；规则留空时直接推送全部新条目；填写规则后由 LLM 筛选并生成回复。",
 		Official:      true,
 		BuiltIn:       true,
 		ReportsErrors: true,
@@ -337,7 +337,14 @@ func (p *RSSWatchPlugin) fetch(ctx context.Context, feedURL string, settings Set
 	if p.client.Jar != nil {
 		key = ""
 	}
-	cached, err := p.feeds.load(ctx, key, 30*time.Second, 60*time.Second, nil, func(loadCtx context.Context) (rssFeedCache, error) {
+	ttl := 30 * time.Second
+	// 多个群订了同一个 UP 主或番剧时，各自的检查时刻错开，30 秒缓存几乎接不住；
+	// B 站接口频繁请求容易触发风控，所以放宽到 2 分钟，让它们共用同一次抓取。
+	// 仍短于最短检查间隔 5 分钟，开播提醒最多晚 2 分钟。
+	if isBilibiliFeedURL(url) {
+		ttl = bilibiliFeedShareTTL
+	}
+	cached, err := p.feeds.load(ctx, key, ttl, 60*time.Second, nil, func(loadCtx context.Context) (rssFeedCache, error) {
 		feed, err := p.fetchFresh(loadCtx, url, settings)
 		return cacheRSSFeed(feed), err
 	})
@@ -364,6 +371,9 @@ func (p *RSSWatchPlugin) fetchFeed(ctx context.Context, feedURL string, settings
 	}
 	requestCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	if isBilibiliFeedURL(feedURL) {
+		return p.fetchBilibiliFeed(requestCtx, feedURL)
+	}
 	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, feedURL, nil)
 	if err != nil {
 		return parsedFeed{}, err
