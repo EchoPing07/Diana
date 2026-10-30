@@ -43,7 +43,7 @@
         </div>
         <ol class="steps compact">
           <li><span>1</span><div><h3>Detect the platform</h3><p>Picks the right full archive for your OS and CPU, and refuses platforms it does not support.</p></div></li>
-          <li><span>2</span><div><h3>Download and verify</h3><p>Fetches the release's <code>SHA256SUMS</code> alongside it and only extracts once the checksum matches.</p></div></li>
+          <li><span>2</span><div><h3>Download and verify</h3><p>Fetches the release's <code>latest.json</code> alongside it and only installs once the SHA-256 matches.</p></div></li>
           <li><span>3</span><div><h3>Back up, then switch</h3><p>Backs up the database, WAL/SHM files, frontend, old binary and launch script, keeping any existing <code>config.yaml</code>.</p></div></li>
           <li><span>4</span><div><h3>Start and probe</h3><p>Polls <code>/api/health</code> for up to 45 seconds. On Unix a failed upgrade restores the previous set of files.</p></div></li>
         </ol>
@@ -69,13 +69,13 @@
 
       <section class="section searchable" id="manual-release">
         <div class="section-heading"><p class="eyebrow">Alternative</p><h2>Install a full release archive by hand</h2></div>
-        <p>For offline environments or where changes need manual approval, download the full archive matching your platform: the <code>.tar.gz</code> or <code>.zip</code> plus <code>SHA256SUMS</code> from the same release. It includes the backend, prebuilt WebUI and launch scripts, with no separate WebUI deployment or Node.js installation needed. Releases no longer provide standalone binaries; custom deployments can extract the executable and frontend assets from the full package.</p>
+        <p>For offline environments or where changes need manual approval, download the file for your platform and check its SHA-256 against the same release's <code>latest.json</code> or the digest shown on the Releases page. Windows gets a single <code>diana-windows-amd64.exe</code>: put it in a folder of its own and double-click it. macOS, Linux and Android Termux get a <code>.tar.gz</code> archive with the program and its launch scripts. The WebUI is built into the program, so there is no separate WebUI deployment and no Node.js to install.</p>
         <pre><code># macOS Apple Silicon example
 shasum -a 256 diana-macos-arm64.tar.gz
 tar -xzf diana-macos-arm64.tar.gz
 cd diana-macos-arm64
 ./run.sh</code></pre>
-        <div class="callout"><strong>First migration from an older release</strong><p>Full archives now use the <code>diana-&lt;os&gt;-&lt;arch&gt;</code> naming scheme. Older consoles that only recognize <code>diana-webui-…</code> archives cannot self-update directly; rerun the one-click installer above or install a full package manually the first time.</p></div>
+        <div class="callout"><strong>First migration from an older release</strong><p>Windows now ships an .exe. For a transition period releases still carry the <code>diana-windows-amd64.zip</code> and <code>SHA256SUMS</code> that older consoles need, so consoles from v0.8.91 on can still update from the WebUI. v0.8.90 and earlier only recognize <code>diana-webui-…</code> archives; rerun the one-click installer above or install the download by hand the first time.</p></div>
       </section>
 
       <section class="section searchable" id="docker">

@@ -5,7 +5,6 @@ package updater
 
 import (
 	"archive/tar"
-	"archive/zip"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
@@ -52,11 +51,81 @@ type ReleaseAsset struct {
 	Size int64
 }
 
-// ReleasePackage contains the platform package and its checksum manifest.
+// ReleasePackage contains the platform package and how to verify it.
 type ReleasePackage struct {
-	Tag       string
-	Archive   ReleaseAsset
+	Tag     string
+	Archive ReleaseAsset
+	// SHA256 是 latest.json 里写好的包摘要。为空时（较早的版本）下载 Checksums
+	// 指向的 sha256sum 格式清单再从里面查。
+	SHA256    string
 	Checksums ReleaseAsset
+	// Format、Binary、InstallAs 来自 latest.json 的平台规则：包是什么格式（exe 或
+	// tar.gz）、程序在包里的路径、装好后叫什么。都为空时按 ExpectedReleaseAssetName
+	// 的命名约定推，所以只要清单写对，以后换包名、换格式不用再改更新器。
+	Format    string
+	Binary    string
+	InstallAs string
+}
+
+// resolvedReleasePackage 是按清单规则或命名约定补齐后的下载规则。
+type resolvedReleasePackage struct {
+	format string
+	binary string
+	digest string // 清单直接给的摘要；为空时去校验文件里查
+}
+
+func (u *ReleasePackageUpdater) resolvePackage(release ReleasePackage) (resolvedReleasePackage, error) {
+	assetName := release.Archive.Name
+	if !safeReleaseFileName(assetName) || strings.TrimSpace(release.Archive.URL) == "" {
+		return resolvedReleasePackage{}, fmt.Errorf("%w: %s", ErrReleaseAssetMissing, u.assetName)
+	}
+	rule, err := u.resolvePackageFormat(release)
+	if err != nil {
+		return resolvedReleasePackage{}, err
+	}
+	if digest := strings.ToLower(strings.TrimSpace(release.SHA256)); digest != "" {
+		if decoded, err := hex.DecodeString(digest); err != nil || len(decoded) != sha256.Size {
+			return resolvedReleasePackage{}, fmt.Errorf("%w: invalid digest for %s", ErrChecksumMissing, assetName)
+		}
+		rule.digest = digest
+		return rule, nil
+	}
+	if !safeReleaseFileName(release.Checksums.Name) || !validReleaseDownloadURL(release.Checksums.URL) {
+		return resolvedReleasePackage{}, ErrChecksumMissing
+	}
+	return rule, nil
+}
+
+func (u *ReleasePackageUpdater) resolvePackageFormat(release ReleasePackage) (resolvedReleasePackage, error) {
+	assetName := release.Archive.Name
+	if release.Format == "" {
+		if assetName != u.assetName {
+			return resolvedReleasePackage{}, fmt.Errorf("%w: %s", ErrReleaseAssetMissing, u.assetName)
+		}
+		if strings.HasSuffix(assetName, ".exe") {
+			return resolvedReleasePackage{format: "exe"}, nil
+		}
+		return resolvedReleasePackage{format: "tar.gz", binary: releasePackageDirectory(assetName) + "/" + u.binaryName}, nil
+	}
+	if installAs := strings.TrimSpace(release.InstallAs); installAs != "" && installAs != u.binaryName {
+		return resolvedReleasePackage{}, fmt.Errorf("updater: %s renames the program to %s but this installation runs %s; rerun the one-click installer", release.Tag, installAs, u.binaryName)
+	}
+	switch release.Format {
+	case "exe":
+		return resolvedReleasePackage{format: "exe"}, nil
+	case "tar.gz":
+		if _, err := safeArchiveDestination(string(filepath.Separator), release.Binary); err != nil {
+			return resolvedReleasePackage{}, err
+		}
+		return resolvedReleasePackage{format: "tar.gz", binary: release.Binary}, nil
+	default:
+		return resolvedReleasePackage{}, fmt.Errorf("%w: unsupported package format %q", ErrInvalidReleaseArchive, release.Format)
+	}
+}
+
+func safeReleaseFileName(name string) bool {
+	name = strings.TrimSpace(name)
+	return name != "" && name != "." && name != ".." && !strings.ContainsAny(name, `/\`)
 }
 
 type UpdatePolicy struct {
@@ -172,7 +241,9 @@ func (u *ReleasePackageUpdater) endOperation() {
 	u.operationMu.Unlock()
 }
 
-// ExpectedReleaseAssetName returns the complete-package asset for a platform.
+// ExpectedReleaseAssetName returns the release asset for a platform. Windows
+// ships the program itself as an .exe; the other platforms ship a .tar.gz with
+// run.sh and uninstall.sh beside it.
 func ExpectedReleaseAssetName(goos, goarch string) string {
 	packageOS := strings.TrimSpace(goos)
 	if packageOS == "darwin" {
@@ -180,7 +251,7 @@ func ExpectedReleaseAssetName(goos, goarch string) string {
 	}
 	base := "diana-" + packageOS + "-" + strings.TrimSpace(goarch)
 	if goos == "windows" {
-		return base + ".zip"
+		return base + ".exe"
 	}
 	return base + ".tar.gz"
 }
@@ -414,13 +485,11 @@ func (u *ReleasePackageUpdater) Download(ctx context.Context, release ReleasePac
 		return Result{}, fmt.Errorf("updater: invalid release tag %q", release.Tag)
 	}
 	assetName := release.Archive.Name
-	if assetName != u.assetName || strings.TrimSpace(release.Archive.URL) == "" {
-		return Result{}, fmt.Errorf("%w: %s", ErrReleaseAssetMissing, u.assetName)
+	rule, err := u.resolvePackage(release)
+	if err != nil {
+		return Result{}, err
 	}
-	if release.Checksums.Name != "SHA256SUMS" || strings.TrimSpace(release.Checksums.URL) == "" {
-		return Result{}, ErrChecksumMissing
-	}
-	if !validReleaseDownloadURL(release.Archive.URL) || !validReleaseDownloadURL(release.Checksums.URL) {
+	if !validReleaseDownloadURL(release.Archive.URL) {
 		return Result{}, errors.New("updater: release asset URL must use HTTPS")
 	}
 	if pending, ok := u.pendingUpdate(); ok && pending.TargetVersion == release.Tag && !force {
@@ -456,20 +525,22 @@ func (u *ReleasePackageUpdater) Download(ctx context.Context, release ReleasePac
 		mirrorBase = u.mirror.Base(ctx, release.Archive.URL)
 	}
 
-	checksumPath := filepath.Join(workRoot, "SHA256SUMS")
-	u.setProgress("checksum", 0, release.Archive.Size)
-	// 校验清单优先直连：它是整个下载的信任锚，而且只有几 KB，加不加速都一样快。
-	// 镜像只是直连不通时的兜底——套了镜像的包也得先对得上这份清单里的摘要。
-	if _, err := downloadReleaseFile(ctx, u.httpClient, checksumSources(release.Checksums.URL, mirrorBase), checksumPath, maxChecksumBytes, nil); err != nil {
-		return Result{}, fmt.Errorf("download SHA256SUMS: %w", err)
-	}
-	manifest, err := os.ReadFile(checksumPath)
-	if err != nil {
-		return Result{}, err
-	}
-	wantDigest, err := checksumForAsset(manifest, assetName)
-	if err != nil {
-		return Result{}, err
+	wantDigest := rule.digest
+	if wantDigest == "" {
+		checksumPath := filepath.Join(workRoot, "checksums")
+		u.setProgress("checksum", 0, release.Archive.Size)
+		// 校验清单优先直连：它是整个下载的信任锚，而且只有几 KB，加不加速都一样快。
+		// 镜像只是直连不通时的兜底——套了镜像的包也得先对得上这份清单里的摘要。
+		if _, err := downloadReleaseFile(ctx, u.httpClient, checksumSources(release.Checksums.URL, mirrorBase), checksumPath, maxChecksumBytes, nil); err != nil {
+			return Result{}, fmt.Errorf("download %s: %w", release.Checksums.Name, err)
+		}
+		manifest, err := os.ReadFile(checksumPath)
+		if err != nil {
+			return Result{}, err
+		}
+		if wantDigest, err = checksumForAsset(manifest, assetName); err != nil {
+			return Result{}, err
+		}
 	}
 	archivePath := filepath.Join(workRoot, assetName)
 	u.setProgress("downloading", 0, release.Archive.Size)
@@ -493,11 +564,23 @@ func (u *ReleasePackageUpdater) Download(ctx context.Context, release ReleasePac
 	if err := os.Mkdir(extractRoot, 0o700); err != nil {
 		return Result{}, err
 	}
-	if err := extractReleaseArchive(archivePath, extractRoot); err != nil {
-		return Result{}, err
+	var stagedExecutable string
+	if rule.format == "exe" {
+		// 发布的就是程序本身，没有包可解，改名放进暂存目录即可。
+		stagedExecutable = filepath.Join(extractRoot, u.binaryName)
+		if err := os.Rename(archivePath, stagedExecutable); err != nil {
+			return Result{}, err
+		}
+	} else {
+		if err := extractTarGZ(archivePath, extractRoot); err != nil {
+			return Result{}, err
+		}
+		if stagedExecutable, err = safeArchiveDestination(extractRoot, rule.binary); err != nil {
+			return Result{}, err
+		}
 	}
-	packageRoot := filepath.Join(extractRoot, releasePackageDirectory(assetName))
-	stagedExecutable := filepath.Join(packageRoot, u.binaryName)
+	// run.sh、README.txt 这些随包文件和程序放在同一层。
+	packageRoot := filepath.Dir(stagedExecutable)
 	if !regularFileExists(stagedExecutable) {
 		return Result{}, fmt.Errorf("%w: expected binary is missing", ErrInvalidReleaseArchive)
 	}
@@ -536,7 +619,7 @@ func (u *ReleasePackageUpdater) Download(ctx context.Context, release ReleasePac
 		Supervisor: detectServiceSupervisor(),
 		LogPath:    filepath.Join(updatesRoot, "last-update.log"),
 	}
-	optionalNames := []string{"run.sh", "run.bat", "README.txt"}
+	optionalNames := []string{"run.sh", "README.txt"}
 	if runtime.GOOS == "darwin" {
 		optionalNames = append(optionalNames, "desktopctl-helper")
 	}
@@ -902,16 +985,6 @@ func checksumForAsset(manifest []byte, assetName string) (string, error) {
 	return "", fmt.Errorf("%w: %s is not listed", ErrChecksumMissing, assetName)
 }
 
-func extractReleaseArchive(archivePath, target string) error {
-	if strings.HasSuffix(archivePath, ".tar.gz") {
-		return extractTarGZ(archivePath, target)
-	}
-	if strings.HasSuffix(archivePath, ".zip") {
-		return extractZIP(archivePath, target)
-	}
-	return fmt.Errorf("%w: unsupported archive type", ErrInvalidReleaseArchive)
-}
-
 func extractTarGZ(archivePath, target string) error {
 	file, err := os.Open(archivePath)
 	if err != nil {
@@ -978,66 +1051,6 @@ func extractTarGZ(archivePath, target string) error {
 	return nil
 }
 
-func extractZIP(archivePath, target string) error {
-	reader, err := zip.OpenReader(archivePath)
-	if err != nil {
-		return fmt.Errorf("%w: %v", ErrInvalidReleaseArchive, err)
-	}
-	defer reader.Close()
-	if len(reader.File) > maxExtractedPackageFiles {
-		return fmt.Errorf("%w: too many files", ErrInvalidReleaseArchive)
-	}
-	var total uint64
-	for _, entry := range reader.File {
-		destination, err := safeArchiveDestination(target, entry.Name)
-		if err != nil {
-			return err
-		}
-		if entry.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("%w: archive symlink %q is not allowed", ErrInvalidReleaseArchive, entry.Name)
-		}
-		if entry.FileInfo().IsDir() {
-			if err := os.MkdirAll(destination, 0o755); err != nil {
-				return err
-			}
-			continue
-		}
-		if entry.UncompressedSize64 > uint64(maxExtractedPackageBytes)-total {
-			return fmt.Errorf("%w: extracted content is too large", ErrInvalidReleaseArchive)
-		}
-		total += entry.UncompressedSize64
-		if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
-			return err
-		}
-		input, err := entry.Open()
-		if err != nil {
-			return err
-		}
-		mode := entry.Mode().Perm() & 0o755
-		if mode&0o400 == 0 {
-			mode |= 0o600
-		}
-		out, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
-		if err != nil {
-			_ = input.Close()
-			return err
-		}
-		_, copyErr := io.Copy(out, io.LimitReader(input, int64(entry.UncompressedSize64)+1))
-		inputCloseErr := input.Close()
-		outputCloseErr := out.Close()
-		if copyErr != nil {
-			return copyErr
-		}
-		if inputCloseErr != nil {
-			return inputCloseErr
-		}
-		if outputCloseErr != nil {
-			return outputCloseErr
-		}
-	}
-	return nil
-}
-
 func safeArchiveDestination(root, name string) (string, error) {
 	name = filepath.FromSlash(strings.TrimSpace(name))
 	if name == "" || filepath.IsAbs(name) {
@@ -1056,7 +1069,7 @@ func safeArchiveDestination(root, name string) (string, error) {
 
 func releasePackageDirectory(assetName string) string {
 	name := strings.TrimSuffix(assetName, ".tar.gz")
-	return strings.TrimSuffix(name, ".zip")
+	return strings.TrimSuffix(name, ".exe")
 }
 
 func validReleaseDownloadURL(raw string) bool {

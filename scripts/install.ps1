@@ -165,35 +165,29 @@ if ($version -notmatch '^v\d') {
     throw "Invalid release version: $version"
 }
 
-$packageName = "diana-windows-amd64"
+# Windows 发布的就是程序本身（diana-windows-amd64.exe），下载校验后改名放进安装目录。
 $compatBinaryName = "diana-webui-windows-amd64.exe"
 $binaryName = "diana-webui.exe"
-$archiveName = "$packageName.zip"
+$archiveName = "diana-windows-amd64.exe"
 $baseUrl = "https://github.com/$repository/releases/download/$version"
 $tempDir = Join-Path ([IO.Path]::GetTempPath()) ("diana-install-" + [guid]::NewGuid().ToString("N"))
 $archivePath = Join-Path $tempDir $archiveName
-$sumsPath = Join-Path $tempDir "SHA256SUMS"
-$stageDir = Join-Path $tempDir "stage"
+$manifestPath = Join-Path $tempDir "latest.json"
 
 try {
-    New-Item -ItemType Directory -Force -Path $tempDir, $stageDir | Out-Null
-    Get-DianaDownload "$baseUrl/SHA256SUMS" $sumsPath "SHA256SUMS"
+    New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
+    Get-DianaDownload "$baseUrl/latest.json" $manifestPath "latest.json"
 
-    $checksumLine = Get-Content $sumsPath | Where-Object {
-        $parts = $_ -split '\s+', 2
-        $parts.Count -eq 2 -and $parts[1].TrimStart('*') -eq $archiveName
-    } | Select-Object -First 1
-    if (-not $checksumLine) { throw "SHA-256 entry for $archiveName was not found." }
-    $expected = ($checksumLine -split '\s+')[0].ToLowerInvariant()
+    # 摘要写在 latest.json 的 packages 里，取 asset 是本平台包的那一条。
+    $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
+    $rule = @($manifest.releases | ForEach-Object { $_.packages } | Where-Object { $_.asset -eq $archiveName }) | Select-Object -First 1
+    if (-not $rule -or -not $rule.sha256) { throw "SHA-256 entry for $archiveName was not found." }
+    $expected = ([string]$rule.sha256).ToLowerInvariant()
     if ($expected -notmatch '^[0-9a-f]{64}$') { throw "Invalid SHA-256 entry for $archiveName." }
     Get-DianaDownload "$baseUrl/$archiveName" $archivePath "Diana $version for windows/amd64"
     $actual = (Get-FileHash -Algorithm SHA256 -Path $archivePath).Hash.ToLowerInvariant()
     if ($actual -ne $expected) { throw "SHA-256 verification failed for $archiveName." }
     Write-Host "==> SHA-256 verified"
-
-    Expand-Archive -Path $archivePath -DestinationPath $stageDir -Force
-    $packageDir = Join-Path $stageDir $packageName
-    if (-not (Test-Path (Join-Path $packageDir $binaryName))) { throw "Release package does not contain the Diana executable." }
 
     New-Item -ItemType Directory -Force -Path $installDir, (Join-Path $installDir "data"), (Join-Path $installDir "logs") | Out-Null
     $timestamp = (Get-Date).ToUniversalTime().ToString("yyyyMMddTHHmmssZ")
@@ -237,9 +231,7 @@ try {
         if (Test-Path "$dbPath$suffix") { Copy-Item -Force "$dbPath$suffix" (Join-Path $dataBackup "diana.db$suffix") }
     }
 
-    Copy-Item -Recurse -Force -Path (Join-Path $packageDir "*") -Destination $installDir
-    # 包里的 frontend-next 只给旧版自更新器过校验，前端已编进程序，安装目录不留它。
-    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue (Join-Path $installDir "frontend-next")
+    Copy-Item -Force -LiteralPath $archivePath -Destination (Join-Path $installDir $binaryName)
     $configFile = Join-Path $installDir "config.yaml"
     $generatedPassword = $null
     $passwordCleared = $false
@@ -292,19 +284,17 @@ try {
 
     $commandDir = Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps"
     $commandShim = Join-Path $commandDir "diana.cmd"
-    if (Test-Path (Join-Path $installDir "uninstall.ps1")) {
-        New-Item -ItemType Directory -Force -Path $commandDir | Out-Null
-        # 写入用户级 PATH，同时更新当前 PowerShell；不需要管理员权限。
-        $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-        if (@($userPath -split ';') -notcontains $commandDir) {
-            $updatedPath = if ($userPath) { "$($userPath.TrimEnd(';'));$commandDir" } else { $commandDir }
-            [Environment]::SetEnvironmentVariable("Path", $updatedPath, "User")
-        }
-        if (@($env:Path -split ';') -notcontains $commandDir) {
-            $env:Path = "$commandDir;$env:Path"
-        }
-        "@echo off`r`n`"$installDir\$binaryName`" %*" | Set-Content -Encoding ASCII $commandShim
+    New-Item -ItemType Directory -Force -Path $commandDir | Out-Null
+    # 写入用户级 PATH，同时更新当前 PowerShell；不需要管理员权限。
+    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    if (@($userPath -split ';') -notcontains $commandDir) {
+        $updatedPath = if ($userPath) { "$($userPath.TrimEnd(';'));$commandDir" } else { $commandDir }
+        [Environment]::SetEnvironmentVariable("Path", $updatedPath, "User")
     }
+    if (@($env:Path -split ';') -notcontains $commandDir) {
+        $env:Path = "$commandDir;$env:Path"
+    }
+    "@echo off`r`n`"$installDir\$binaryName`" %*" | Set-Content -Encoding ASCII $commandShim
 
     if ($startAfterInstall) {
         Write-Host "==> Start -> enforcing one Diana instance"
