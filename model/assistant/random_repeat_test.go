@@ -6,10 +6,12 @@ package assistant
 import (
 	"context"
 	"fmt"
-	"github.com/SuInk/diana/model/llm"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/SuInk/diana/model/llm"
 )
 
 func repeatEvent(id, user, text string) MessageEvent {
@@ -27,7 +29,7 @@ func TestRandomRepeaterChains(t *testing.T) {
 		t.Helper()
 		e := repeatEvent(id, user, text)
 		p.observe(context.Background(), e)
-		if got := p.takeReply(e, settings); got != want {
+		if got := p.takeReply(e, settings).text; got != want {
 			t.Fatalf("%s: got %q want %q", id, got, want)
 		}
 	}
@@ -64,22 +66,22 @@ func TestRandomRepeaterProbabilityAndScope(t *testing.T) {
 				other := second
 				change(&other)
 				p.observe(context.Background(), other)
-				if got := p.takeReply(other, RandomRepeatConfig{Probability: 100}); got != "" {
+				if got := p.takeReply(other, RandomRepeatConfig{Probability: 100}).text; got != "" {
 					t.Fatal("cross scope repeat", got)
 				}
 			}
 			p.observe(context.Background(), second)
-			got := p.takeReply(second, RandomRepeatConfig{Probability: probability})
+			got := p.takeReply(second, RandomRepeatConfig{Probability: probability}).text
 			if (got != "") != (roll < probability) {
 				t.Fatalf("probability %d roll %d: %q", probability, roll, got)
 			}
-			if got := p.takeReply(second, RandomRepeatConfig{Probability: 100}); got != "" {
+			if got := p.takeReply(second, RandomRepeatConfig{Probability: 100}).text; got != "" {
 				t.Fatal("same message rolled twice")
 			}
 			second.MessageID = "3"
 			second.UserID = "c"
 			p.observe(context.Background(), second)
-			if got := p.takeReply(second, RandomRepeatConfig{Probability: 100}); got != "安排" {
+			if got := p.takeReply(second, RandomRepeatConfig{Probability: 100}).text; got != "安排" {
 				t.Fatal("new repeat did not get another chance")
 			}
 		}
@@ -108,7 +110,7 @@ func TestRandomRepeaterRejectsAndBreaksChain(t *testing.T) {
 			}
 			next := repeatEvent("3", "c", "安排")
 			p.observe(context.Background(), next)
-			if p.takeReply(next, RandomRepeatConfig{Probability: 100}) != "" {
+			if p.takeReply(next, RandomRepeatConfig{Probability: 100}).text != "" {
 				t.Fatal("invalid message did not break chain")
 			}
 		})
@@ -152,7 +154,7 @@ func TestRandomRepeaterPreservesTextAndThreshold(t *testing.T) {
 	for i := 0; i < 4; i++ {
 		e := repeatEvent(fmt.Sprint(i), fmt.Sprint(i), text)
 		p.observe(context.Background(), e)
-		got := p.takeReply(e, RandomRepeatConfig{Threshold: 3, Probability: 100})
+		got := p.takeReply(e, RandomRepeatConfig{Threshold: 3, Probability: 100}).text
 		if i >= 2 && got != text {
 			t.Fatalf("literal text lost: %q", got)
 		}
@@ -162,13 +164,112 @@ func TestRandomRepeaterPreservesTextAndThreshold(t *testing.T) {
 	}
 }
 
+func TestRandomRepeaterTriggersOnceAcrossConcurrentAttempts(t *testing.T) {
+	p := newRandomRepeater()
+	p.roll = func() int { return 0 }
+	p.observe(context.Background(), repeatEvent("1", "a", "安排"))
+	event := repeatEvent("2", "b", "安排")
+	p.observe(context.Background(), event)
+	var replies atomic.Int32
+	var wg sync.WaitGroup
+	for range 20 {
+		wg.Go(func() {
+			if p.takeReply(event, RandomRepeatConfig{Probability: 100, CooldownSeconds: -1}).text != "" {
+				replies.Add(1)
+			}
+		})
+	}
+	wg.Wait()
+	if replies.Load() != 1 {
+		t.Fatalf("concurrent replies=%d, want 1", replies.Load())
+	}
+	for i := range 5 {
+		next := repeatEvent(fmt.Sprint(i+3), fmt.Sprint(i), "安排")
+		p.observe(context.Background(), next)
+		if got := p.takeReply(next, RandomRepeatConfig{Probability: 100, CooldownSeconds: -1}).text; got != "" {
+			t.Fatalf("once mode reopened the chain: %q", got)
+		}
+	}
+}
+
+func TestRandomRepeaterOnceModeKeepsProbability(t *testing.T) {
+	p := newRandomRepeater()
+	rolls := 0
+	p.roll = func() int {
+		rolls++
+		if rolls == 1 {
+			return 99 // 第一次未抽中，不能消耗整轮机会。
+		}
+		return 0
+	}
+	settings := RandomRepeatConfig{Threshold: 2, Probability: 30, CooldownSeconds: -1}
+	for i, want := range []string{"", "", "安排", "", ""} {
+		event := repeatEvent(fmt.Sprint(i), fmt.Sprint(i), "安排")
+		p.observe(context.Background(), event)
+		decision := p.takeReply(event, settings)
+		if decision.text != want || decision.alreadyTriggered != (i > 2) {
+			t.Fatalf("message %d: decision=%+v want=%q", i, decision, want)
+		}
+	}
+	if rolls != 2 {
+		t.Fatalf("probability rolls=%d, want miss then hit", rolls)
+	}
+}
+
+func TestRuntimeRandomRepeaterOnlyOncePerChain(t *testing.T) {
+	channel := &recordingChannel{}
+	r := NewRuntime(BotConfig{RandomRepeat: &RandomRepeatConfig{Enabled: true, Threshold: 2, Probability: 100, CooldownSeconds: -1}, ID: "qq", GroupTriggers: []string{"Diana"}, BotAccount: "42"}, channel, NewPluginManager(), nil, nil, nil, nil)
+	now := time.Now()
+	r.repeater.now = func() time.Time { return now }
+	for i, text := range []string{"安排", "安排", "安排", "安排", "好耶", "好耶", "安排", "安排"} {
+		if i == 3 || i == 6 {
+			now = now.Add(time.Hour)
+		}
+		if err := r.HandleEvent(context.Background(), repeatEvent(fmt.Sprint(i), fmt.Sprint(i%2), text)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sent := channel.sentSnapshot()
+	if len(sent) != 3 || sent[0].Text != "安排" || sent[1].Text != "好耶" || sent[2].Text != "安排" {
+		t.Fatalf("unexpected repeat sequence: %#v", sent)
+	}
+}
+
+func TestRuntimeRandomRepeaterConsumedChainSkipsModel(t *testing.T) {
+	channel := &recordingChannel{}
+	r := NewRuntime(BotConfig{RandomRepeat: &RandomRepeatConfig{Enabled: true, Threshold: 2, Probability: 100, CooldownSeconds: -1}, ID: "qq", BotAccount: "42", GroupTriggers: []string{"Diana"}}, channel, NewPluginManager(), nil, nil, nil, func() (LLMProvider, error) {
+		t.Fatal("consumed repeat reached the model")
+		return nil, nil
+	})
+	ctx := context.Background()
+	r.observeRandomRepeat(ctx, repeatEvent("1", "a", "安排"))
+	second := repeatEvent("2", "b", "安排")
+	r.observeRandomRepeat(ctx, second)
+	if outcome := r.tryRandomRepeat(ctx, second); outcome != "replied" {
+		t.Fatalf("first repeat outcome=%q", outcome)
+	}
+	_, _, handled, outcome := r.prepareMessageEvent(ctx, repeatEvent("3", "c", "安排"))
+	if handled || outcome != randomRepeatAlreadyTriggeredOutcome || len(channel.sentSnapshot()) != 1 {
+		t.Fatalf("consumed chain: handled=%v outcome=%q sent=%d", handled, outcome, len(channel.sentSnapshot()))
+	}
+	direct := repeatEvent("direct", "c", "Diana，2 加 2 等于多少？")
+	direct.ToMe = true
+	if _, _, handled, outcome := r.prepareMessageEvent(ctx, direct); !handled {
+		t.Fatalf("direct question swallowed: %q", outcome)
+	}
+	decision, reason, handled := DescribeEventOutcome(randomRepeatAlreadyTriggeredOutcome)
+	if decision != "not_replied" || reason == "" || handled {
+		t.Fatalf("invalid event description: %q %q %v", decision, reason, handled)
+	}
+}
+
 func TestRuntimeRandomRepeaterMarkedBotBreaksChain(t *testing.T) {
 	manager := NewPluginManager()
 	r := NewRuntime(BotConfig{RandomRepeat: &RandomRepeatConfig{Enabled: true, Threshold: 2, Probability: 100, CooldownSeconds: 60}, ID: "qq", BotAccount: "42", MarkedBotIDs: []string{"bot"}}, &recordingChannel{}, manager, nil, nil, nil, nil)
 	for i, user := range []string{"a", "bot", "b"} {
 		e := repeatEvent(fmt.Sprint(i), user, "安排")
 		r.observeRandomRepeat(context.Background(), e)
-		if r.repeater.takeReply(e, RandomRepeatConfig{Probability: 100}) != "" {
+		if r.repeater.takeReply(e, RandomRepeatConfig{Probability: 100}).text != "" {
 			t.Fatal("marked bot counted as human")
 		}
 	}
@@ -183,7 +284,7 @@ func TestRuntimeRandomRepeaterDisabledClearsChain(t *testing.T) {
 	r.SetProfiles(ProfileSet{Profiles: []BotConfig{{ID: "qq", BotAccount: "42", RandomRepeat: &RandomRepeatConfig{Enabled: true, Threshold: 2, Probability: 100}}}})
 	e := repeatEvent("3", "b", "安排")
 	r.observeRandomRepeat(context.Background(), e)
-	if r.repeater.takeReply(e, RandomRepeatConfig{Probability: 100}) != "" {
+	if r.repeater.takeReply(e, RandomRepeatConfig{Probability: 100}).text != "" {
 		t.Fatal("disabled interval kept old chain")
 	}
 }
@@ -205,7 +306,9 @@ func TestLiveRandomRepeaterReplay(t *testing.T) {
 	provider := &repeaterLiveProvider{client: client}
 	manager := NewPluginManager()
 	channel := &recordingChannel{}
-	r := NewRuntime(BotConfig{RandomRepeat: &RandomRepeatConfig{Enabled: true, Threshold: 2, Probability: 100, CooldownSeconds: 60}, ID: "qq", BotAccount: "42", GroupTriggers: []string{"Diana"}}, channel, manager, nil, nil, nil, func() (LLMProvider, error) { return provider, nil })
+	r := NewRuntime(BotConfig{RandomRepeat: &RandomRepeatConfig{Enabled: true, Threshold: 2, Probability: 100, CooldownSeconds: -1}, ID: "qq", BotAccount: "42", GroupTriggers: []string{"Diana"}}, channel, manager, nil, nil, nil, func() (LLMProvider, error) { return provider, nil })
+	now := time.Now()
+	r.repeater.now = func() time.Time { return now }
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	for i, user := range []string{"a", "b", "c"} {
@@ -219,6 +322,14 @@ func TestLiveRandomRepeaterReplay(t *testing.T) {
 	}
 	if got := channel.sentSnapshot(); len(got) != 1 || got[0].Text != "安排" {
 		t.Fatalf("repeat replay: %#v", got)
+	}
+	now = now.Add(time.Hour)
+	beforeLate := provider.calls.Load()
+	if err := r.HandleEvent(ctx, repeatEvent("late", "d", "安排")); err != nil {
+		t.Fatal(err)
+	}
+	if len(channel.sentSnapshot()) != 1 || provider.calls.Load() != beforeLate {
+		t.Fatal("same chain triggered again after cooldown")
 	}
 	beforeDirect := provider.calls.Load()
 	e := repeatEvent("direct", "a", "Diana，2 加 2 等于多少？只回答数字。")
@@ -277,7 +388,7 @@ func TestRuntimeRandomRepeaterGroupOverridesAndAdmission(t *testing.T) {
 }
 
 func TestRandomRepeatBehaviorConfigRoundTripAndInheritance(t *testing.T) {
-	cfg := BotConfig{ID: "qq", RandomRepeat: &RandomRepeatConfig{Enabled: true, Threshold: 3, Probability: 0, CooldownSeconds: 0}}
+	cfg := BotConfig{ID: "qq", RandomRepeat: &RandomRepeatConfig{Enabled: true, Threshold: 3, Probability: 0, CooldownSeconds: -1}}
 	payload := PayloadFromConfig(cfg)
 	restored := ConfigFromPayload(payload, BotConfig{}).WithDefaults()
 	if restored.RandomRepeat == nil || *restored.RandomRepeat != *cfg.RandomRepeat {

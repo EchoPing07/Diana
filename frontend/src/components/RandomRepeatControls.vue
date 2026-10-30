@@ -28,7 +28,7 @@ function update(key: "threshold" | "probability" | "cooldown_seconds", event: Ev
         <span class="track" aria-hidden="true"></span>
         <span class="switch-label">随机复读</span>
       </label>
-      <span class="hint">不同群友连续发送相同纯文字时，随机原样跟一句。达到参与人数后，每条新复读都按概率判断；成功复读后进入冷却，后续消息不重置冷却，也不因间隔时间重新计数。复读不调用模型，不参与 @、引用、指令、媒体或机器人消息，最多 500 字。</span>
+      <span class="hint">不同群友连续发送相同纯文字时，随机原样跟一句。达到参与人数后，每条新消息仍按概率判断；冷却设为 -1 时，同一轮只在抽中后跟一次，后续相同内容不再触发，换内容后重新计数。复读不调用模型，不参与 @、引用、指令、媒体或机器人消息，最多 500 字。</span>
     </div>
     <template v-if="value.enabled && mode !== 'inherit'">
       <div class="field">
@@ -41,7 +41,8 @@ function update(key: "threshold" | "probability" | "cooldown_seconds", event: Ev
       </div>
       <div class="field">
         <label :for="`${id}-cooldown`">冷却时间（秒）</label>
-        <input :id="`${id}-cooldown`" class="input" type="number" min="0" max="600" step="1" :value="value.cooldown_seconds" @input="update('cooldown_seconds', $event)" />
+        <input :id="`${id}-cooldown`" class="input" type="number" min="-1" max="600" step="1" :value="value.cooldown_seconds" @input="update('cooldown_seconds', $event)" />
+        <span class="hint">-1（默认）：同一轮只跟一次；0：不冷却；正数：两次复读的最短间隔。</span>
       </div>
     </template>
   </div>

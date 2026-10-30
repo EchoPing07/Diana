@@ -29,12 +29,12 @@ func copyRandomRepeat(value *RandomRepeatConfig) *RandomRepeatConfig {
 }
 func (value *RandomRepeatConfig) normalized() RandomRepeatConfig {
 	if value == nil {
-		return RandomRepeatConfig{Threshold: 2, Probability: 30, CooldownSeconds: 60}
+		return RandomRepeatConfig{Threshold: 2, Probability: 30, CooldownSeconds: -1}
 	}
 	result := *value
 	result.Threshold = max(2, min(10, result.Threshold))
 	result.Probability = max(0, min(100, result.Probability))
-	result.CooldownSeconds = max(0, min(600, result.CooldownSeconds))
+	result.CooldownSeconds = max(-1, min(600, result.CooldownSeconds))
 	return result
 }
 
@@ -42,7 +42,15 @@ type repeatChain struct {
 	text, messageID    string
 	users              map[string]bool
 	attempted          bool
+	triggered          bool
 	updated, lastReply time.Time
+}
+
+const randomRepeatAlreadyTriggeredOutcome = "ignored_random_repeat"
+
+type repeatDecision struct {
+	text             string
+	alreadyTriggered bool
 }
 
 // randomRepeater keeps one bounded chain per robot and conversation.
@@ -117,6 +125,7 @@ func (p *randomRepeater) observe(_ context.Context, event MessageEvent) MessageE
 	}
 	if text == "" || text != chain.text {
 		chain.text, chain.users = text, make(map[string]bool)
+		chain.triggered = false
 	}
 	// Each new message gets one chance; duplicate delivery cannot reroll.
 	chain.attempted = false
@@ -127,20 +136,29 @@ func (p *randomRepeater) observe(_ context.Context, event MessageEvent) MessageE
 	return event
 }
 
-func (p *randomRepeater) takeReply(event MessageEvent, settings RandomRepeatConfig) string {
+func (p *randomRepeater) takeReply(event MessageEvent, settings RandomRepeatConfig) repeatDecision {
+	settings = settings.normalized()
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	chain := p.chains[repeatKey(event)]
-	if chain == nil || chain.text == "" || chain.messageID != event.MessageID || chain.attempted || len(chain.users) < max(2, min(10, settings.Threshold)) {
-		return ""
+	if chain == nil || chain.text == "" || chain.messageID != event.MessageID {
+		return repeatDecision{}
+	}
+	if settings.CooldownSeconds == -1 && chain.triggered {
+		return repeatDecision{alreadyTriggered: true}
+	}
+	if chain.attempted || len(chain.users) < max(2, min(10, settings.Threshold)) {
+		return repeatDecision{}
 	}
 	chain.attempted = true
 	now := p.now()
 	if (!chain.lastReply.IsZero() && now.Sub(chain.lastReply) < time.Duration(max(0, min(600, settings.CooldownSeconds)))*time.Second) || p.roll() >= max(0, min(100, settings.Probability)) {
-		return ""
+		return repeatDecision{}
 	}
+	// -1 模式在抽中后结束这一轮；非负值继续按冷却和每条消息的概率判断。
+	chain.triggered = true
 	chain.lastReply = now
-	return chain.text
+	return repeatDecision{text: chain.text}
 }
 
 func (r *Runtime) observeRandomRepeat(ctx context.Context, event MessageEvent) {
@@ -170,7 +188,12 @@ func (r *Runtime) tryRandomRepeat(ctx context.Context, event MessageEvent) strin
 	if !settings.Enabled || p == nil {
 		return ""
 	}
-	reply := p.takeReply(event, settings)
+	decision := p.takeReply(event, settings)
+	if decision.alreadyTriggered {
+		r.record(r.decisionEventRecord(event, event.RawMessage, randomRepeatAlreadyTriggeredOutcome))
+		return randomRepeatAlreadyTriggeredOutcome
+	}
+	reply := decision.text
 	if reply == "" {
 		return ""
 	}
